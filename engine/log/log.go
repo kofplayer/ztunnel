@@ -228,7 +228,7 @@ func (this *logImp) Info(format string, args ...interface{}) error {
 }
 
 func (this *logImp) Warn(format string, args ...interface{}) error {
-	if this.logLevel > INFO {
+	if this.logLevel > WARN {
 		return nil
 	}
 	return this.doLog(WARN, format, args...)

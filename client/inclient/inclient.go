@@ -11,8 +11,8 @@ import (
 	netSession "ztunnel/engine/net/session"
 )
 
-func NewClient(connectId netSession.SessionID, host string, port uint16, outcli client.NetClient) client.NetClient {
-	cli := zClient.NewClient(host, port, &handler{outcli: outcli, connectId: connectId}, netCodec.NewCodec_data(),
+func NewClient(connectId netSession.SessionID, host string, port uint16, outcli client.NetClient, mgr *ClientMgr) client.NetClient {
+	cli := zClient.NewClient(host, port, &handler{mgr: mgr, outcli: outcli, connectId: connectId}, netCodec.NewCodec_data(),
 		[]netMiddleware.CreateMiddlewareFunc{
 			fullData.NewMiddleware,
 			netEncrypt.CreateServerNetEncryptFunc(),
@@ -21,6 +21,7 @@ func NewClient(connectId netSession.SessionID, host string, port uint16, outcli 
 }
 
 type handler struct {
+	mgr       *ClientMgr
 	outcli    client.NetClient
 	connectId netSession.SessionID
 }
@@ -35,6 +36,7 @@ func (h *handler) OnDisconnect() {
 	data := [netSession.SessionIDSize]byte{}
 	proto.WriteSessionId(data[:], h.connectId)
 	h.outcli.SendMessage(0, proto.MsgIdConnectDelete, data[:])
+	h.mgr.RemoveClient(h.connectId)
 }
 
 func (h *handler) OnMessage(cb uint32, msgID uint32, data []byte) error {
