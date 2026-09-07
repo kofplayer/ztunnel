@@ -2,6 +2,7 @@ package packageLen2Data
 
 import (
 	"encoding/binary"
+
 	netMiddleware "ztunnel/engine/net/middleware"
 )
 
@@ -15,11 +16,13 @@ type Len2Data struct {
 }
 
 func (m *Len2Data) ReceiveData(data []byte) error {
+	// 必须拷贝：调用方复用读取缓冲，别名会导致已转发帧被覆盖（报告 #5）。
+	// uint16 长度天然上限 64KB，无回绕/无上限校验需求。
 	if m.data == nil {
-		m.data = data
-	} else {
-		m.data = append(m.data, data...)
+		m.data = make([]byte, 0, len(data)+64)
 	}
+	m.data = append(m.data, data...)
+
 	for {
 		l := uint32(len(m.data))
 		if l < 2 {
@@ -32,6 +35,9 @@ func (m *Len2Data) ReceiveData(data []byte) error {
 		}
 		err := m.Next().ReceiveData(m.data[2:msgLen])
 		m.data = m.data[msgLen:]
+		if len(m.data) == 0 {
+			m.data = nil
+		}
 		if err != nil {
 			return err
 		}

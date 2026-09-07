@@ -14,7 +14,9 @@
 
 1. `flag.Parse()` → `proto.SetToken(token)` + `proto.NetEncrypt = net_encrypt`（全局开关，见 [../common/CLAUDE.md](../common/CLAUDE.md)）
 2. 初始化日志：`log.NewLog()` → `Init("./log", 前缀)` → `log.SetMainLog(logger)`
-3. `util.GetHostAndPort()` 拆地址（格式必须是 `host:port`，host 可为空）
+3. `util.GetHostAndPort()` 拆地址（格式必须是 `host:port`；IPv6 用 `[::1]:8888` 形式，host 保留方括号返回）
+
+⚠️ `logger.Init` 的返回错误被忽略：`./log` 创建失败时 `logerAll` 为 nil，首条日志调用会 panic。
 
 ## Flag 参数表
 

@@ -26,10 +26,11 @@ type sessionMgr struct {
 func (sm *sessionMgr) NewSession() NetSession {
 	v := new(netSession)
 	v.Init()
-	sm.genUId++
-	v.id = sm.genUId
 	sm.lock.Lock()
 	defer sm.lock.Unlock()
+	// ID 自增必须在锁内：锁外自增在并发创建时会产生重复会话 ID
+	sm.genUId++
+	v.id = sm.genUId
 	sm.sessions[v.id] = v
 	return v
 }

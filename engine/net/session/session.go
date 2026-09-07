@@ -1,6 +1,8 @@
 package netSession
 
 import (
+	"errors"
+
 	netConnect "ztunnel/engine/net/connect"
 )
 
@@ -57,6 +59,11 @@ func (ns *netSession) SetSendMessageFunc(sendMessageFunc SendMessageFunc) {
 }
 
 func (ns *netSession) SendMessage(cb uint32, msgID uint32, data []byte) error {
+	// 会话注册进 sessionMgr 与调用方 SetSendMessageFunc 之间存在窗口，
+	// 未初始化时必须报错而非 nil 函数调用 panic。
+	if ns.sendMessageFunc == nil {
+		return errors.New("send message func is not set")
+	}
 	return ns.sendMessageFunc(cb, msgID, data)
 }
 

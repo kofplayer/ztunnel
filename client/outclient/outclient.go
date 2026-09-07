@@ -3,6 +3,7 @@ package outclient
 import (
 	"encoding/binary"
 	"fmt"
+	"sync"
 	"time"
 	"ztunnel/client/inclient"
 	zClient "ztunnel/common/client"
@@ -76,9 +77,12 @@ func (c *outClient) Stop() error {
 	return nil
 }
 
+const createTunnelTimeout = 10 * time.Second
+
 type handler struct {
-	outCli *outClient
-	timer  *time.Timer
+	outCli  *outClient
+	timerMu sync.Mutex
+	timer   *time.Timer
 }
 
 func (h *handler) OnConnect() {
@@ -91,14 +95,24 @@ func (h *handler) OnReady() {
 	h.outCli.cli.SendMessage(0, proto.MsgIdCreateTunnel, data[:])
 	log.Main().Info("connect server ok")
 	log.Main().Info("try create tunnel server:%v -> %v:%v", h.outCli.svrListenPort, h.outCli.forwardHost, h.outCli.forwardPort)
-	h.timer = time.NewTimer(time.Second * 10)
-	go func() {
-		_, ok := <-h.timer.C
-		if ok {
-			log.Main().Error("try create tunnel timeout")
-			h.outCli.Stop()
-		}
-	}()
+	// time.AfterFunc 到期前不占用 goroutine，Stop 后回调不执行。
+	// 替换原先"常驻 goroutine 阻塞在 <-timer.C"的写法——
+	// 那种写法在每次建隧道成功后泄漏一个永不退出的 goroutine（报告 #7）。
+	h.timerMu.Lock()
+	h.timer = time.AfterFunc(createTunnelTimeout, func() {
+		log.Main().Error("try create tunnel timeout")
+		_ = h.outCli.Stop()
+	})
+	h.timerMu.Unlock()
+}
+
+func (h *handler) stopCreateTunnelTimer() {
+	h.timerMu.Lock()
+	if h.timer != nil {
+		h.timer.Stop()
+		h.timer = nil
+	}
+	h.timerMu.Unlock()
 }
 
 func (h *handler) OnDisconnect() {
@@ -109,17 +123,24 @@ func (h *handler) OnDisconnect() {
 func (h *handler) OnMessage(cb uint32, msgID uint32, data []byte) error {
 	switch msgID {
 	case proto.MsgIdCreateTunnel:
-		h.timer.Stop()
-		h.timer = nil
+		h.stopCreateTunnelTimer()
+		// 解析前校验长度：畸形应答此前会 data[0] 越界 panic（报告 #14）
+		if len(data) < 1 {
+			log.Main().Error("create tunnel response data error")
+			h.outCli.Stop()
+			return fmt.Errorf("create tunnel response data error")
+		}
 		if data[0] != proto.ErrorCodeNone {
 			log.Main().Error("try create tunnel fail")
 			h.outCli.Stop()
 			return fmt.Errorf("create tunnel fail")
-		} else {
-			log.Main().Error("try create tunnel success")
-			log.Main().Info("start success")
 		}
+		log.Main().Info("try create tunnel success")
+		log.Main().Info("start success")
 	case proto.MsgIdConnectNew:
+		if len(data) < netSession.SessionIDSize {
+			return fmt.Errorf("connect new data too short")
+		}
 		connectId := proto.ReadSessionId(data[:netSession.SessionIDSize])
 		var code byte = proto.ErrorCodeNone
 		if _, err := h.outCli.inClientMgr.OpenClient(connectId, h.outCli.forwardHost, h.outCli.forwardPort, h.outCli.cli); err != nil {
@@ -128,12 +149,18 @@ func (h *handler) OnMessage(cb uint32, msgID uint32, data []byte) error {
 		_data := append([]byte{code}, data...)
 		h.outCli.cli.SendMessage(0, proto.MsgIdConnectNew, _data)
 	case proto.MsgIdConnectData:
+		if len(data) < netSession.SessionIDSize {
+			return fmt.Errorf("connect data too short")
+		}
 		connectId := proto.ReadSessionId(data[:netSession.SessionIDSize])
 		cli := h.outCli.inClientMgr.GetClient(connectId)
 		if cli != nil {
 			cli.SendMessage(0, 0, data[netSession.SessionIDSize:])
 		}
 	case proto.MsgIdConnectDelete:
+		if len(data) < netSession.SessionIDSize {
+			return fmt.Errorf("connect delete data too short")
+		}
 		connectId := proto.ReadSessionId(data[:netSession.SessionIDSize])
 		h.outCli.inClientMgr.CloseClient(connectId)
 	}

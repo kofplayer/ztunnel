@@ -7,6 +7,8 @@ import (
 	"crypto/x509"
 	"fmt"
 	"math/rand"
+	"sync"
+
 	netMiddleware "ztunnel/engine/net/middleware"
 )
 
@@ -21,6 +23,13 @@ const keySize = 8
 
 type BaseNetEncrypt struct {
 	netMiddleware.MiddlewareBase
+	// sendMu 串行化发送侧：GoNextScNo/GoNextCsNo 与掩码加密必须原子执行。
+	// 控制会话会被多个 goroutine 并发 SendMessage（每个用户连接各自的
+	// receiver goroutine），无锁时掩码序列错乱导致对端永久失步（报告 #6）。
+	sendMu sync.Mutex
+	// mu 互斥握手状态机：OnEvent（拨号 goroutine）与 ReceiveData（接收
+	// goroutine）并发读写 status/密钥字段（-race 实测竞争点）。
+	mu   sync.Mutex
 	Key1 Key
 	Key2 Key
 	CsNo Key

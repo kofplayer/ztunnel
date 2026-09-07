@@ -50,6 +50,7 @@ func (h *handler) OnDisconnect(s netSession.NetSession) {
 		return
 	}
 	outServer := bindObject.(netServer.NetServer)
+	// Stop 现在会同时关闭该 outserver 的全部存量用户会话（报告 #9）
 	outServer.Stop()
 	log.Main().Info("client %v disconnect, stop listen", s.GetConn().RemoteAddr())
 }
@@ -71,19 +72,27 @@ func (h *handler) OnMessage(s netSession.NetSession, cb uint32, msgID uint32, da
 			return fmt.Errorf("token error")
 		}
 		outPort := binary.BigEndian.Uint16(data[proto.TokenLen:])
-		if svr := outserver.NewServer("", outPort, s); svr == nil {
-			return fmt.Errorf("create tunnel fail")
-		} else {
-			s.SetBindObject(svr)
-
-			log.Main().Info("client %v listen on %v", s.GetConn().RemoteAddr(), outPort)
-			go func() {
-				if err := svr.Start(); err != nil {
-					svr.Stop()
-				}
-			}()
-			s.SendMessage(0, proto.MsgIdCreateTunnel, []byte{proto.ErrorCodeNone})
+		if outPort == 0 {
+			log.Main().Warn("client %v invalid out port 0", s.GetConn().RemoteAddr())
+			s.SendMessage(0, proto.MsgIdCreateTunnel, []byte{proto.ErrorCodeNormal})
+			return nil
 		}
+		svr := outserver.NewServer("", outPort, s)
+		// 同步绑定端口：失败立即回错误码，避免异步 Start 失败被吞后的"假成功"（报告 #8）
+		if err := svr.Listen(); err != nil {
+			log.Main().Warn("client %v create tunnel on port %v fail: %v", s.GetConn().RemoteAddr(), outPort, err)
+			s.SendMessage(0, proto.MsgIdCreateTunnel, []byte{proto.ErrorCodeNormal})
+			return nil
+		}
+		s.SetBindObject(svr)
+
+		log.Main().Info("client %v listen on %v", s.GetConn().RemoteAddr(), outPort)
+		go func() {
+			if err := svr.Start(); err != nil {
+				svr.Stop()
+			}
+		}()
+		s.SendMessage(0, proto.MsgIdCreateTunnel, []byte{proto.ErrorCodeNone})
 	case proto.MsgIdConnectNew:
 		if len(data) != netSession.SessionIDSize+1 {
 			log.Main().Warn("client %v data error3", s.GetConn().RemoteAddr())
@@ -92,7 +101,10 @@ func (h *handler) OnMessage(s netSession.NetSession, cb uint32, msgID uint32, da
 		code := data[0]
 		sessionId := proto.ReadSessionId(data[1:])
 		if code != proto.ErrorCodeNone {
-			outServer := s.GetBindObject().(netServer.NetServer)
+			outServer, err := h.bindOutServer(s, "3")
+			if err != nil {
+				return err
+			}
 			session := outServer.GetSessionMgr().GetSession(sessionId)
 			if session != nil {
 				session.Close()
@@ -104,7 +116,10 @@ func (h *handler) OnMessage(s netSession.NetSession, cb uint32, msgID uint32, da
 			return fmt.Errorf("data error4")
 		}
 		sessionId := proto.ReadSessionId(data[:netSession.SessionIDSize])
-		outServer := s.GetBindObject().(netServer.NetServer)
+		outServer, err := h.bindOutServer(s, "4")
+		if err != nil {
+			return err
+		}
 		session := outServer.GetSessionMgr().GetSession(sessionId)
 		if session != nil {
 			session.Close()
@@ -114,11 +129,10 @@ func (h *handler) OnMessage(s netSession.NetSession, cb uint32, msgID uint32, da
 			log.Main().Warn("client %v data error5", s.GetConn().RemoteAddr())
 			return fmt.Errorf("data error5")
 		}
-		bindObject := s.GetBindObject()
-		if bindObject == nil {
-			return fmt.Errorf("status error2")
+		outServer, err := h.bindOutServer(s, "5")
+		if err != nil {
+			return err
 		}
-		outServer := bindObject.(netServer.NetServer)
 		connectId := proto.ReadSessionId(data[:netSession.SessionIDSize])
 		session := outServer.GetSessionMgr().GetSession(connectId)
 		if session != nil {
@@ -126,4 +140,16 @@ func (h *handler) OnMessage(s netSession.NetSession, cb uint32, msgID uint32, da
 		}
 	}
 	return nil
+}
+
+// bindOutServer 取会话绑定的 outserver。未建隧道（BindObject 为 nil）时
+// 必须拒绝消息而非断言 nil——此前任意未认证连接发一条 ConnectDelete 即可
+// 触发 nil 接口断言 panic 崩溃整个进程（报告 #2）。
+func (h *handler) bindOutServer(s netSession.NetSession, errNo string) (netServer.NetServer, error) {
+	bindObject := s.GetBindObject()
+	if bindObject == nil {
+		log.Main().Warn("client %v status error%v", s.GetConn().RemoteAddr(), errNo)
+		return nil, fmt.Errorf("status error%v", errNo)
+	}
+	return bindObject.(netServer.NetServer), nil
 }

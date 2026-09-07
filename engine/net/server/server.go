@@ -21,6 +21,7 @@ type NetServer interface {
 	SetOnReady(func(netSession.NetSession))
 	SetOnDisconnect(func(netSession.NetSession))
 	SetOnMessage(func(s netSession.NetSession, cb uint32, msgID uint32, data []byte) error)
+	Listen() error
 	Start() error
 	Stop() error
 	GetSessionMgr() netSession.SessionMgr
@@ -64,6 +65,11 @@ func (this *netServer) SetOnDisconnect(onDisconnect func(netSession.NetSession))
 
 func (this *netServer) SetOnMessage(onMessage func(s netSession.NetSession, cb uint32, t uint32, data []byte) error) {
 	this.onMessage = onMessage
+}
+
+// Listen 预绑定监听端口但不进入 Accept 循环，供调用方在 Start 前确认端口可用。
+func (this *netServer) Listen() error {
+	return this.acceptor.Listen()
 }
 
 func (this *netServer) Start() error {
@@ -115,6 +121,12 @@ func (this *netServer) Start() error {
 }
 
 func (this *netServer) Stop() error {
+	// 关闭全部存量会话：仅停 listener 会让已建立的连接悬挂不释放，
+	// 造成连接/内存泄漏（报告 #9，控制通道断开时由 inserver 调用）。
+	this.sessionMgr.TravelSession(func(s netSession.NetSession) bool {
+		_ = s.Close()
+		return true
+	})
 	return this.acceptor.Stop()
 }
 

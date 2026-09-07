@@ -2,7 +2,8 @@ package client
 
 import (
 	"errors"
-	"sync"
+	"sync/atomic"
+
 	netCodec "ztunnel/engine/net/codec"
 	netConnect "ztunnel/engine/net/connect"
 	netMiddleware "ztunnel/engine/net/middleware"
@@ -77,9 +78,11 @@ func (c *netClient) Connect() error {
 		currentMiddleware.SetNext(_m)
 		currentMiddleware = _m
 	}
-	var wg sync.WaitGroup
-	shakeHandsComplete := false
-	wg.Add(1)
+	// 连接结果：拨号失败 / 握手前断开 / 握手完成，三者先到先得。
+	// 用 cap 1 channel + 非阻塞发送取代原先跨 goroutine 写的共享 err 变量
+	// （-race 实测 err 存在数据竞争，报告 #10）。
+	result := make(chan error, 1)
+	var handshakeComplete int32
 	c.lastMiddleware = netMiddlewareCommon.NewMiddlewareLast(func(data []byte) error {
 		cb, msgID, msgData, err := c.codec.Decode(data)
 		if err != nil {
@@ -87,8 +90,11 @@ func (c *netClient) Connect() error {
 		}
 		return c.onMessage(cb, msgID, msgData)
 	}, func() {
-		shakeHandsComplete = true
-		wg.Done()
+		atomic.StoreInt32(&handshakeComplete, 1)
+		select {
+		case result <- nil:
+		default:
+		}
 		if c.onReady != nil {
 			c.onReady()
 		}
@@ -102,27 +108,30 @@ func (c *netClient) Connect() error {
 			c.onConnect()
 		}
 	})
-	var err error
 	c.connector.SetOnDisconnect(func() {
 		firstMiddleware.FireEvent(netMiddleware.MiddlewareEventOnDisconnect)
 		if c.onDisconnect != nil {
 			c.onDisconnect()
 		}
-		if !shakeHandsComplete {
-			err = errors.New("shake hands fail")
-			wg.Done()
+		if atomic.LoadInt32(&handshakeComplete) == 0 {
+			select {
+			case result <- errors.New("shake hands fail"):
+			default:
+			}
 		}
 	})
 	c.connector.SetOnData(func(data []byte) error {
 		return firstMiddleware.ReceiveData(data)
 	})
 	go func() {
-		if err = c.connector.Connect(); err != nil {
-			wg.Done()
+		if err := c.connector.Connect(); err != nil {
+			select {
+			case result <- err:
+			default:
+			}
 		}
 	}()
-	wg.Wait()
-	return err
+	return <-result
 }
 
 func (c *netClient) Disconnect() error {
