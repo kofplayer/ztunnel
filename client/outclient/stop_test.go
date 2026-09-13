@@ -125,7 +125,7 @@ func TestOutClient_ConnectNewReply_HasExactWidth(t *testing.T) {
 
 	// 故意发来一个超长的 ConnectNew（带 8 字节"额外"数据）
 	long := []byte{0, 0, 0, 1, 2, 3, 4, 9, 9, 9, 9, 9}
-	// forward 端口不可达 → code 必为 ErrorCodeNormal，但应答宽度必须正确
+	// forward 端口不可达 → code 必为 ErrorCodeFailed，但应答宽度必须正确
 	_ = h.OnMessage(0, proto.MsgIdConnectNew, long)
 
 	testutil.True(t, len(got) == 1, "应回出一帧", len(got))

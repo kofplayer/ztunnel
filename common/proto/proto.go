@@ -48,9 +48,14 @@ func TokenMatches(got string) bool {
 	return subtle.ConstantTimeCompare(b, []byte(Token)) == 1
 }
 
+// 隧道应答的错误码。**值即线上格式，不可改**。
+//
+// 原 `ErrorCodeNormal` 的语义其实是"失败"（E-06）：名字与实际含义相反，
+// 读代码的人很容易把 `code == ErrorCodeNormal` 当成"一切正常"从而反向判断。
+// 这里改名而**保持数值不变**，所以不是断代改动，新旧版本仍可互通。
 const (
-	ErrorCodeNone   = 0
-	ErrorCodeNormal = 1
+	ErrorCodeNone   = 0 // 成功
+	ErrorCodeFailed = 1 // 失败（原名 ErrorCodeNormal，语义反了，已改名）
 )
 
 func ReadSessionId(b []byte) netSession.SessionID {

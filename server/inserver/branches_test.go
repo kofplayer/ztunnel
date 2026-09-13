@@ -113,7 +113,7 @@ func TestInServer_ConnectNewError_ClosesUserSession(t *testing.T) {
 	testutil.SilentLog(t)
 	h, ctrl, _, user := newBoundSetup(t)
 
-	data := append([]byte{proto.ErrorCodeNormal}, sessionBytes(user.id)...)
+	data := append([]byte{proto.ErrorCodeFailed}, sessionBytes(user.id)...)
 	testutil.NoError(t, h.OnMessage(ctrl, 0, proto.MsgIdConnectNew, data))
 	testutil.Equal(t, 1, user.closes, "连接失败码应导致关闭用户会话")
 }
@@ -219,7 +219,7 @@ func TestInServer_UnboundSession_RejectsMessages(t *testing.T) {
 		msgID uint32
 		data  []byte
 	}{
-		{"ConnectNew", proto.MsgIdConnectNew, append([]byte{proto.ErrorCodeNormal}, sessionBytes(7)...)},
+		{"ConnectNew", proto.MsgIdConnectNew, append([]byte{proto.ErrorCodeFailed}, sessionBytes(7)...)},
 		{"ConnectDelete", proto.MsgIdConnectDelete, sessionBytes(7)},
 		{"ConnectData", proto.MsgIdConnectData, append(sessionBytes(7), 'z')},
 	}
@@ -272,7 +272,7 @@ func TestInServer_CreateTunnel_ZeroOutPort_RespondsError(t *testing.T) {
 		"outPort=0 应回错误码而不是断连")
 
 	last := ctrl.LastSent(proto.MsgIdCreateTunnel)
-	testutil.True(t, len(last) == 1 && last[0] == proto.ErrorCodeNormal,
+	testutil.True(t, len(last) == 1 && last[0] == proto.ErrorCodeFailed,
 		"outPort=0 应应答错误码, got", last)
 	testutil.True(t, ctrl.GetBindObject() == nil, "被拒绝后不应绑定 outserver")
 }

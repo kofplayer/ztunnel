@@ -183,7 +183,16 @@ func (m *ServerNetEncrypt) SendData(bytes []byte) error {
 	}
 	m.sendMu.Lock()
 	defer m.sendMu.Unlock()
+
+	// 修复 M-10（与 client.go 对称）：序号推进早于交付，交付失败时必须回滚，
+	// 否则与对端永久错位。批次1 引入 ErrFull 后，"发送失败但连接仍存活"成为
+	// 真实可达状态，这条不再是理论问题。
+	saved := m.ScNo
 	m.GoNextScNo()
 	m.Key1Key2ScNoEncrypt(bytes)
-	return m.Pre().SendData(bytes)
+	if err := m.Pre().SendData(bytes); err != nil {
+		m.ScNo = saved
+		return err
+	}
+	return nil
 }

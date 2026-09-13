@@ -86,14 +86,14 @@ func (h *handler) OnMessage(s netSession.NetSession, cb uint32, msgID uint32, da
 		outPort := binary.BigEndian.Uint16(data[proto.TokenLen:])
 		if outPort == 0 {
 			log.Main().Warn("client %v invalid out port 0", remoteAddr(s))
-			replyCode(s, proto.ErrorCodeNormal)
+			replyCode(s, proto.ErrorCodeFailed)
 			return nil
 		}
 		svr := outserver.NewServer(h.exportIP, outPort, s)
 		// 同步绑定端口：失败立即回错误码，避免异步 Start 失败被吞后的"假成功"（报告 #8）
 		if err := svr.Listen(); err != nil {
 			log.Main().Warn("client %v create tunnel on port %v fail: %v", remoteAddr(s), outPort, err)
-			replyCode(s, proto.ErrorCodeNormal)
+			replyCode(s, proto.ErrorCodeFailed)
 			return nil
 		}
 		s.SetBindObject(svr)

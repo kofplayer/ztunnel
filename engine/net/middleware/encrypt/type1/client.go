@@ -116,9 +116,18 @@ func (m *ClientNetEncrypt) SendData(bytes []byte) error {
 	}
 	m.sendMu.Lock()
 	defer m.sendMu.Unlock()
+
+	// 修复 M-10：序号推进发生在发送**之前**，一旦交付失败就会与对端永久错位。
+	// 批次1 引入 ErrFull（背压）之后这不再只是理论问题——队列满时连接可以仍然
+	// 存活，而本帧根本没出去。失败则回滚，宁可这帧没发，也不留下错位的序号。
+	saved := m.CsNo
 	m.GoNextCsNo()
 	m.Key1Key2CsNoEncrypt(bytes)
-	return m.Pre().SendData(bytes)
+	if err := m.Pre().SendData(bytes); err != nil {
+		m.CsNo = saved
+		return err
+	}
+	return nil
 }
 
 func (m *ClientNetEncrypt) OnEvent(e netMiddleware.MiddlewareEvent) {

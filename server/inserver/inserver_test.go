@@ -98,7 +98,7 @@ func TestInServer_ConnectNewError_BeforeTunnel_NoPanic(t *testing.T) {
 	if testutil.InCrashProbe() {
 		testutil.SilentLog(t)
 		h, s := newHandlerSession()
-		_ = h.OnMessage(s, 0, proto.MsgIdConnectNew, []byte{proto.ErrorCodeNormal, 0, 0, 0, 1})
+		_ = h.OnMessage(s, 0, proto.MsgIdConnectNew, []byte{proto.ErrorCodeFailed, 0, 0, 0, 1})
 		return
 	}
 	if err := testutil.RunCrashProbe(t); err != nil {

@@ -87,7 +87,7 @@ func TestErrorCodeValues(t *testing.T) {
 	if ErrorCodeNone != 0 {
 		t.Fatalf("ErrorCodeNone 必须是 0，got %d", ErrorCodeNone)
 	}
-	if ErrorCodeNormal == ErrorCodeNone {
+	if ErrorCodeFailed == ErrorCodeNone {
 		t.Fatal("失败码不能与成功码同值")
 	}
 }

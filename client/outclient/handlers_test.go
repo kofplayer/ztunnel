@@ -75,7 +75,7 @@ func TestOutClient_CreateTunnel_ErrorCodeStopsClient(t *testing.T) {
 	h := newTestHandler()
 	h.outCli.cli = &failingClient{err: errors.New("gone")}
 
-	err := h.OnMessage(0, proto.MsgIdCreateTunnel, []byte{proto.ErrorCodeNormal})
+	err := h.OnMessage(0, proto.MsgIdCreateTunnel, []byte{proto.ErrorCodeFailed})
 	testutil.Error(t, err, "服务端回错误码时必须报错以触发重连")
 
 	select {
@@ -115,14 +115,14 @@ func TestOutClient_CreateTunnel_SuccessClearsTimer(t *testing.T) {
 // ConnectNew 应答
 // ---------------------------------------------------------------------------
 
-// 转发建立失败时回 ErrorCodeNormal；控制通道写失败必须可见并上抛（M-18）。
+// 转发建立失败时回 ErrorCodeFailed；控制通道写失败必须可见并上抛（M-18）。
 func TestOutClient_ConnectNew_ReplyFailureIsReturned(t *testing.T) {
 	testutil.SilentLog(t)
 	proto.SetToken("tk")
 	t.Cleanup(func() { proto.SetToken("") })
 
 	h := newTestHandler()
-	// forward 指向必然被拒的地址 → OpenClient 失败 → code=ErrorCodeNormal
+	// forward 指向必然被拒的地址 → OpenClient 失败 → code=ErrorCodeFailed
 	h.outCli.forwardHost, h.outCli.forwardPort = "127.0.0.1", 1
 	h.outCli.cli = &failingClient{err: errors.New("control channel gone")}
 

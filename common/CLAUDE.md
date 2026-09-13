@@ -25,7 +25,7 @@
 | 4 | `MsgIdConnectDelete` | 双向 | `connectId(4B)` |
 
 - `connectId` 即 `netSession.SessionID`（uint32），`ReadSessionId`/`WriteSessionId` 做大端转换。
-- 错误码：`ErrorCodeNone=0`、`ErrorCodeNormal=1`。
+- 错误码：`ErrorCodeNone=0`、`ErrorCodeFailed=1`。
 - **全局变量** `proto.Token`/`TokenLen`/`NetEncrypt`：由 [../cmd/](../cmd/CLAUDE.md) 入口在启动时设置，决定鉴权与中间件栈选择——**必须在装配 client/server 之前设置**。
 - ⚠️ **token 为空（默认）即无鉴权**：任何能连上控制端口的客户端都能要求监听任意端口；且无端口白名单与申请限速。公网部署必须设置强 token。
 - ⚠️ token 比较用 `==`（非常量时间比较），安全敏感场景可改为 `subtle.ConstantTimeCompare`。

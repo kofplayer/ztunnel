@@ -1,5 +1,7 @@
 package netMiddleware
 
+import "errors"
+
 type MiddlewareEvent int32
 
 const (
@@ -42,11 +44,23 @@ func (m *MiddlewareBase) Next() Middleware {
 	return m.next
 }
 
+// ReceiveData / SendData 的默认实现是"透传到下一跳/上一跳"。
+//
+// 修复 L-1：原先直接解引用 m.next / m.pre，而同一文件的 OnEvent 已经判空——三处
+// 标准不一致。链一旦配错（例如把 fullData 放到链尾、或 CreateMiddlewareFunc 工厂
+// 返回 nil 造成接线残缺），这里就是 nil 接口调用 panic。统一改为返回明确 error，
+// 让失败落在错误通道上而不是 panic 通道上。
 func (m *MiddlewareBase) ReceiveData(bytes []byte) error {
+	if m.next == nil {
+		return errors.New("middleware: ReceiveData reached end of chain (next is nil)")
+	}
 	return m.next.ReceiveData(bytes)
 }
 
 func (m *MiddlewareBase) SendData(bytes []byte) error {
+	if m.pre == nil {
+		return errors.New("middleware: SendData reached head of chain (pre is nil)")
+	}
 	return m.pre.SendData(bytes)
 }
 

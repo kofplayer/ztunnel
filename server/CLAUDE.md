@@ -9,7 +9,7 @@
 - `CreateTunnel`（c→s）：
   1. 校验长度 `len(data) == TokenLen+2`、会话**未绑定过** bindObject、token 匹配，任一失败返回 error → **连接被工厂包装层关闭**（见 [../common/CLAUDE.md](../common/CLAUDE.md) error 语义）。
   2. `outPort == 0` → 回错误码（不允许）。
-  3. `outserver.NewServer("", outPort, s)` 后**同步 `svr.Listen()` 绑定端口**：被占用等失败立即回 `ErrorCodeNormal`（避免异步 Start 失败被静默吞掉后客户端收到"假成功"）；成功才 `s.SetBindObject(svr)`（bindObject 机制见 [../engine/net/CLAUDE.md](../engine/net/CLAUDE.md)）。
+  3. `outserver.NewServer("", outPort, s)` 后**同步 `svr.Listen()` 绑定端口**：被占用等失败立即回 `ErrorCodeFailed`（避免异步 Start 失败被静默吞掉后客户端收到"假成功"）；成功才 `s.SetBindObject(svr)`（bindObject 机制见 [../engine/net/CLAUDE.md](../engine/net/CLAUDE.md)）。
   4. `go svr.Start()` 并回 `CreateTunnel(ErrorCodeNone)`。
 - `ConnectNew`（c→s，code≠0）：`bindOutServer` → 按 connectId 关闭对应用户会话（真实服务连不上，断开终端用户）。
 - `ConnectDelete`：同上，关闭对应用户会话。

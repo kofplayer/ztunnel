@@ -165,7 +165,7 @@ func (h *handler) OnMessage(cb uint32, msgID uint32, data []byte) error {
 		connectId := proto.ReadSessionId(data[:netSession.SessionIDSize])
 		var code byte = proto.ErrorCodeNone
 		if _, err := h.outCli.inClientMgr.OpenClient(connectId, h.outCli.forwardHost, h.outCli.forwardPort, h.outCli.cli); err != nil {
-			code = proto.ErrorCodeNormal
+			code = proto.ErrorCodeFailed
 		}
 		// 只回显 4 字节 connectId。此前是 `append([]byte{code}, data...)`
 		// 把收到的**整个** payload 原样回显，而服务端要求该帧长度恒为
