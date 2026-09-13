@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      # .gitattributes 已把 *.go 归一为 eol=lf，因此这条检查在 Linux runner 上可信。
+      # 在 Windows 工作树直接跑 gofmt -l 会因 CRLF 误报全部文件，不要据此判断。
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { echo "gofmt needed:"; gofmt -l .; exit 1; }
+
+      - name: vet
+        run: go vet ./...
+
+      - name: build
+        run: go build ./...
+
+      # 零第三方依赖是硬性约束：go.sum 不应存在，且不得出现非 stdlib / 非 ztunnel 的 import
+      - name: no third-party dependencies
+        run: |
+          test ! -f go.sum || { echo "go.sum exists: third-party deps are forbidden"; exit 1; }
+          go list -deps -test ./... | grep -E '^[^[:space:]]+\.[^[:space:]]+/' && {
+            echo "found non-stdlib import"; exit 1; } || true
+
+      - name: test -race
+        run: go test -race -count=1 -cover ./...
+
+      # 建议性：本机未跑过 golangci-lint，且在 M-18（8 处被忽略的 SendMessage error）
+      # 修完之前开 errcheck 必然红。Phase 3 结束后把 continue-on-error 去掉转为阻塞。
+      - name: lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+        continue-on-error: true

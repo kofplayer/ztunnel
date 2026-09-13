@@ -1,0 +1,8 @@
+# 统一按 LF 入库：Windows 工作树在 core.autocrlf=true 下是 CRLF，
+# 会使 `gofmt -l .` 把全部 72 个 .go 文件误报为未格式化（报告 E-10），
+# 也让 CI 的 gofmt 检查不可信。
+* text=auto eol=lf
+
+*.bat text eol=crlf
+*.png binary
+*.jpg binary

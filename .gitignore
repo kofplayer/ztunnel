@@ -1,0 +1,21 @@
+# 编译产物：build.bat 统一输出到仓库根，且都带 ztunnel_ 前缀
+/ztunnel_client_linux_x64
+/ztunnel_client_windows_x64.exe
+/ztunnel_server_linux_x64
+/ztunnel_server_windows_x64.exe
+
+# 历史遗留产物（旧版 build.bat 落在 cmd/，以及本地下过的 .exe）
+/cmd/ztunnel_*
+*.exe
+
+# 运行时产物：日志落在相对路径 ./log（由工作目录决定落盘点）
+/log/
+*.log
+
+# 编辑器
+/.vscode/
+/.idea/
+
+# 测试与性能分析产物
+*.test
+*.out

@@ -1,0 +1,17 @@
+run:
+  timeout: 5m
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck     # 会命中 M-18：8 处被忽略的 SendMessage 返回值
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - bodyclose
+    - errorlint
+
+issues:
+  # 不过滤历史问题，让新增缺陷不会藏在既有噪音里
+  exclude-use-default: false
