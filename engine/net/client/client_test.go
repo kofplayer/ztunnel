@@ -181,6 +181,58 @@ func TestNetClient_FullLifecycleWithHandshake(t *testing.T) {
 		"错误应指引调用方构造新实例，实际", err)
 }
 
+// 回归 DOS-01（客户端侧）：对端接受 TCP 连接后一言不发时，原先 `return <-result`
+// 没有任何超时，Connect() 会**永久阻塞**——outClient.Start() 挂死，
+// dial/receiver/sender 三个 goroutine 与整条中间件链全部泄漏，进程却看似健康。
+func TestNetClient_ConnectTimesOutWhenPeerNeverHandshakes(t *testing.T) {
+	testutil.SilentLog(t)
+
+	// 服务端 accept 后握着连接什么都不发
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	testutil.NoError(t, err, "起监听")
+	defer ln.Close()
+
+	peerCh := make(chan net.Conn, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err == nil {
+			peerCh <- c // 不关闭、不写入
+		}
+	}()
+
+	prev := HandshakeTimeout
+	HandshakeTimeout = 500 * time.Millisecond
+	t.Cleanup(func() { HandshakeTimeout = prev })
+
+	c := newClientToPointAt(t, ln.Addr().String()) // 无中间件 => OnReady 永不触发
+
+	done := make(chan error, 1)
+	go func() { done <- c.Connect() }()
+
+	select {
+	case err := <-done:
+		testutil.Error(t, err, "对端不回握手时 Connect 不得返回 nil")
+		testutil.True(t, strings.Contains(err.Error(), "handshake timeout"),
+			"应报握手超时, 实际", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("DOS-01 未修复：Connect() 在对端永不握手时永久阻塞")
+	}
+
+	// 超时必须把连接真正断开，否则拨号建立的 fd 与收发 goroutine 仍在泄漏
+	var peer net.Conn
+	select {
+	case peer = <-peerCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("服务端未 accept 到连接")
+	}
+	defer peer.Close()
+	peer.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_, err = peer.Read(make([]byte, 4))
+	testutil.Error(t, err, "客户端超时后应已关闭连接（服务端侧应读到 EOF/错误）")
+
+	testutil.Equal(t, stateDone, c.state.Load(), "超时后应落终态，不得留下可重试的假象")
+}
+
 // SendMessage 在 Connect 之前调用必须报错而不是 nil 接口 panic（报告 L-12）。
 func TestNetClient_SendMessageBeforeConnect(t *testing.T) {
 	testutil.SilentLog(t)

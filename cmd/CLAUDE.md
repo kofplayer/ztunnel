@@ -30,6 +30,8 @@
 | `-net_encrypt` | `false` | 控制通道加密（两端必须一致） |
 | `-token` | `""` | 鉴权令牌（两端必须一致） |
 | `-log_level` | `0` | 0=DEBUG 1=INFO 2=WARN 3=ERROR 4=FATAL 5=NONE |
+| `-dial_timeout` | `5s` | TCP 拨号超时，必须 > 0。此前是裸 `net.Dial` 无超时，目标被 DROP 时要等内核默认（约 21s）。默认值取自 `socketNetConnect.DialTimeout` |
+| `-handshake_timeout` | `30s` | 等握手完成的超时，必须 > 0。此前 `Connect()` 无限等待：对端 accept 后一言不发就会永久阻塞并泄漏 goroutine 与连接。默认值取自 `netClient.HandshakeTimeout` |
 
 **server**（日志前缀 `zs_`）：`-listen`（默认 `:8888`，客户端连接端口，非最终暴露端口）、`-net_encrypt`、`-token`、`-log_level`。
 

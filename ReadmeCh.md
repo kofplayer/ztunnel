@@ -89,10 +89,14 @@ Usage of ./ztunnel_server_linux_x64:
 ```sh
 ztunnel_client_windows_x64.exe -h
 Usage of ztunnel_client_windows_x64.exe:
+  -dial_timeout duration
+        TCP dial timeout (must be > 0) (default 5s)
   -export_port uint
         server export port (1-65535) (default 9999)
   -forward string
         forward address (host:port) (default "localhost:9999")
+  -handshake_timeout duration
+        handshake completion timeout (must be > 0) (default 30s)
   -log_level int
         log level DEBUG:0 INFO:1 WARN:2 ERROR:3 FATAL:4 NONE:5 (default 0)
   -net_encrypt
@@ -108,6 +112,7 @@ Usage of ztunnel_client_windows_x64.exe:
 | `-server` | 服务端控制通道地址。 |
 | `-export_port` | 要求服务端在公网监听的端口。启动时校验 `1-65535`；越界会直接报错退出，不再被静默截断成另一个端口。 |
 | `-forward` | 要暴露的内网服务地址。**服务端无法指定这个地址**——它只来自本参数，所以被攻陷的服务端不能借此让客户端去连别的目标。 |
+| `-dial_timeout` / `-handshake_timeout` | 必须为正数。此前拨号是裸 `net.Dial`、**没有超时**（目标被防火墙 DROP 时要等内核默认的约 21 秒），而等握手完成更是**完全没有超时**：对端接受 TCP 连接后一言不发，`Connect()` 就会永久阻塞，goroutine 与连接全部泄漏，而进程看起来还正常。 |
 | `-token` / `-net_encrypt` | 必须与服务端一致。 |
 
 ## 半关闭

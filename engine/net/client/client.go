@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sync/atomic"
+	"time"
 
 	netCodec "ztunnel/engine/net/codec"
 	netConnect "ztunnel/engine/net/connect"
@@ -89,6 +90,15 @@ func (c *netClient) SetOnDisconnect(f func()) {
 func (c *netClient) SetOnMessage(f func(cb uint32, msgID uint32, data []byte) error) {
 	c.onMessage = f
 }
+
+// HandshakeTimeout 是等待握手完成的最长时间。
+//
+// 修复 DOS-01（客户端侧）：原先 `return <-result` 没有任何超时。对端接受 TCP
+// 连接后不回任何数据（或中间设备把后续包吞掉）时，result 永远无人写入，
+// Connect() 就**永久阻塞**：调用方 outClient.Start() 挂死，dial/receiver/sender
+// 三个 goroutine 与整条中间件链全部泄漏，而进程看起来还活着。
+// 设为包级变量是为了让入口（-handshake_timeout）在启动时一次性覆盖；运行期不要改它。
+var HandshakeTimeout = 30 * time.Second
 
 // Connect 组装中间件链、拨号并等待握手完成。
 //
@@ -194,7 +204,26 @@ func (c *netClient) connect() error {
 			}
 		}
 	}()
-	return <-result
+	// 三者先到先得：拨号失败 / 握手完成 / 握手前断开。
+	// 加超时是因为对端可能接受 TCP 后一言不发（见 HandshakeTimeout 的说明）——
+	// 没有它，这条 goroutine 会永久挂在 <-result 上。
+	timer := time.NewTimer(HandshakeTimeout)
+	defer timer.Stop()
+
+	select {
+	case err := <-result:
+		// 这里**不**主动 Disconnect：能走到这条分支只有两种情况——
+		// 拨号失败（根本没有连接需要回收），或断开流程已经在跑了
+		// （对端关闭触发 onDisconnectFunc 后才把错误塞进 result）。
+		// 多调一次 Disconnect 会派发 OnDisconnect，于是 inclient 会为一个
+		// **从未建立过**的转发补发 ConnectDelete，服务端凭空多收一帧删除消息。
+		return err
+	case <-timer.C:
+		// 只有这条路径确实持有一个"已建立但永远不会完成握手"的连接，必须回收
+		_ = c.connector.Disconnect()
+		return fmt.Errorf("handshake timeout after %v (peer accepted the connection "+
+			"but never completed the handshake)", HandshakeTimeout)
+	}
 }
 
 func (c *netClient) Disconnect() error {

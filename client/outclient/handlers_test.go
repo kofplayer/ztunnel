@@ -144,7 +144,10 @@ func TestOutClient_ConnectNew_ReplyWidth(t *testing.T) {
 	long := append(idBytes(11), 0xDE, 0xAD) // 故意超长
 	testutil.NoError(t, h.OnMessage(0, proto.MsgIdConnectNew, long))
 
-	testutil.Equal(t, 1, len(sent), "应回出一帧")
+	testutil.Equal(t, 1, len(sent),
+		"只应回出一帧 ConnectNew 应答；若出现第二帧，多半是 inclient 为这个"+
+			"**从未建立**的转发补发了 ConnectDelete（拨号失败不应派发断开通知，"+
+			"那会让服务端凭空多收一帧删除消息）")
 	testutil.Equal(t, netSession.SessionIDSize+1, len(sent[0]),
 		"M-01 未修复：应答把对端的多余字节原样回显了")
 }

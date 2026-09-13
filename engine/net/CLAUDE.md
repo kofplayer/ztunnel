@@ -82,6 +82,7 @@ First ──> mw1 ──> mw2 ──> ... ──> Last
 
 ⚠️ **健壮性缺口（已知，未修）**：
 - **无应用层心跳**：仅 TCP keepalive，NAT 映射失效/半开连接双方长期无感知。
-- **握手阶段无任何超时、无连接数上限**：对端完成三次握手后静默即可让服务端的会话 + 2 个 goroutine + 整条中间件实例永久驻留（**预认证**资源耗尽）；客户端 `Connect()` 可无限阻塞。TCP keepalive 杀得死死对端，杀不死"活着但不握手"。
+- **握手阶段无读超时、无连接数上限**（⚠️ 仅服务端侧未修）：对端完成三次握手后静默即可让服务端的会话 + 2 个 goroutine + 整条中间件实例永久驻留（**预认证**资源耗尽）。TCP keepalive 杀得死死对端，杀不死"活着但不握手"。修法需在 `Conn` 接口上扩 `SetReadDeadline` 并回收未完成握手的连接，属跨层改动。
+  - 客户端侧已于批次4 修复：拨号改用 `net.Dialer{Timeout}`（默认 5s），`Connect()` 等握手加了 `HandshakeTimeout`（默认 30s）兜底，超时会主动断开回收。
 - 稳态连接也**无读写 deadline**。（曾疑为"未设 `TCP_NODELAY`"，执行阶段核实：Go 标准库 `net/tcpsock.go` 的 `newTCPConn` 第一行即 `setNoDelay(fd, true)`，拨号与 accept 出的每条 TCP 连接都经它 —— **TCP_NODELAY 本就默认启用**，原判断不成立。）
 - 无半关闭语义：任一方向 FIN 即双向拆除。

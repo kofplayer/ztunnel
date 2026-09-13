@@ -12,6 +12,8 @@ import (
 	"ztunnel/common/proto"
 	"ztunnel/common/util"
 	"ztunnel/engine/log"
+	netClient "ztunnel/engine/net/client"
+	socketNetConnect "ztunnel/engine/net/connect/socket"
 )
 
 // errHelp 表示用户请求了 -h：按 Go flag 包 ExitOnError 的惯例以退出码 0 结束。
@@ -21,12 +23,14 @@ var errHelp = errors.New("help requested")
 var reconnectDelay = 10 * time.Second
 
 type config struct {
-	logLevel   int
-	server     string
-	forward    string
-	exportPort uint
-	netEncrypt bool
-	token      string
+	logLevel    int
+	server      string
+	forward     string
+	exportPort  uint
+	netEncrypt  bool
+	token       string
+	dialTimeout time.Duration
+	handshakeTo time.Duration
 }
 
 func newFlagSet() (*flag.FlagSet, *config) {
@@ -38,6 +42,10 @@ func newFlagSet() (*flag.FlagSet, *config) {
 	fs.UintVar(&c.exportPort, "export_port", 9999, "server export port (1-65535)")
 	fs.BoolVar(&c.netEncrypt, "net_encrypt", false, "encrypt data between client and server (default false)")
 	fs.StringVar(&c.token, "token", "", "client connect to server token")
+	// 此前拨号是裸 net.Dial（无超时），等握手也无限等：对端 accept 后一言不发
+	// 就会让进程挂在那里且 goroutine/连接全泄漏（报告 DOS-01）。
+	fs.DurationVar(&c.dialTimeout, "dial_timeout", socketNetConnect.DialTimeout, "TCP dial timeout (must be > 0)")
+	fs.DurationVar(&c.handshakeTo, "handshake_timeout", netClient.HandshakeTimeout, "handshake completion timeout (must be > 0)")
 	return fs, c
 }
 
@@ -75,6 +83,13 @@ func (c config) validate() (endpoints, error) {
 	if c.logLevel < log.DEBUG || c.logLevel > log.NONE {
 		return endpoints{}, fmt.Errorf("invalid -log_level %d (must be %d-%d)", c.logLevel, log.DEBUG, log.NONE)
 	}
+	// 超时必须是正数：0 会让拨号必败或让握手无限等待，等于没修 DOS-01。
+	if c.dialTimeout <= 0 {
+		return endpoints{}, fmt.Errorf("invalid -dial_timeout %v (must be > 0)", c.dialTimeout)
+	}
+	if c.handshakeTo <= 0 {
+		return endpoints{}, fmt.Errorf("invalid -handshake_timeout %v (must be > 0)", c.handshakeTo)
+	}
 	// 此前是 flag.Int + uint16() 强转且无范围校验：-export_port=70000 会静默
 	// 变成 4464（暴露到错误的端口），=65536 变成 0（陷入重连死循环）（M-20）。
 	if c.exportPort == 0 || c.exportPort > 65535 {
@@ -107,6 +122,10 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
+
+	// 启动期一次性覆盖 engine 侧的超时默认值（运行期不再修改）
+	socketNetConnect.DialTimeout = cfg.dialTimeout
+	netClient.HandshakeTimeout = cfg.handshakeTo
 
 	proto.SetToken(cfg.token)
 	proto.NetEncrypt = cfg.netEncrypt

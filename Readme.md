@@ -94,10 +94,14 @@ Usage of ./ztunnel_server_linux_x64:
 ```sh
 ztunnel_client_windows_x64.exe -h
 Usage of ztunnel_client_windows_x64.exe:
+  -dial_timeout duration
+        TCP dial timeout (must be > 0) (default 5s)
   -export_port uint
         server export port (1-65535) (default 9999)
   -forward string
         forward address (host:port) (default "localhost:9999")
+  -handshake_timeout duration
+        handshake completion timeout (must be > 0) (default 30s)
   -log_level int
         log level DEBUG:0 INFO:1 WARN:2 ERROR:3 FATAL:4 NONE:5 (default 0)
   -net_encrypt
@@ -113,6 +117,7 @@ Usage of ztunnel_client_windows_x64.exe:
 | `-server` | Control-channel address of the server. |
 | `-export_port` | Public port the server should listen on. Validated to `1-65535`; an out-of-range value now fails at startup instead of being silently truncated to another port. |
 | `-forward` | The private service to expose. **The server cannot choose this** — it only comes from this flag, so a compromised server cannot make the client connect elsewhere by itself. |
+| `-dial_timeout` / `-handshake_timeout` | Must be positive. Before these existed, dialing used a bare `net.Dial` with no timeout (a firewalled target stalled for ~21 s at the kernel default), and waiting for the handshake had **no timeout at all**: a peer that accepted the TCP connection but never spoke would block `Connect()` forever, leaking its goroutines and the connection while the process looked healthy. |
 | `-token` / `-net_encrypt` | Must match the server. |
 
 ## Half-closed connections
