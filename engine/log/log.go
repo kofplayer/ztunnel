@@ -1,6 +1,7 @@
 package log
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -202,6 +203,16 @@ func (this *logImp) doLog(level int, format string, args ...interface{}) error {
 	fullMsg := fmt.Sprintf("%s%04d/%02d/%02d %02d:%02d:%02d %v:%v: %v", levelNames[level], year, month, day, hour, min, sec, file, line, msg)
 	if level > DEBUG {
 		fmt.Println(fullMsg)
+	}
+	// logerAll 只在 openLoggers 成功后才被赋值。Init 失败（例如 cwd 只读导致
+	// MkdirAll/OpenFile 出错）时它是 nil，而 nil 接收者上调 DoLog 会在
+	// `this.isNeedChangeFile` 里解引用 createFileTime → panic。连接收发循环的
+	// recoverPanic 也要写日志，那等于"兜 panic 的兜底自身 panic"，会直接杀死
+	// 进程、绕过 recover 语义（报告 CRASH-02）。因此这里降级到 stderr 并返回
+	// error，**绝不 panic**。
+	if this.logerAll == nil {
+		fmt.Fprintln(os.Stderr, fullMsg)
+		return errors.New("logger not initialized")
 	}
 	//this.loggers[level].DoLog(fullMsg, now)
 	return this.logerAll.DoLog(fullMsg, now)

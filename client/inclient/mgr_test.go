@@ -92,7 +92,17 @@ func TestClientMgr_ReopenSameId_ReplacesOldButKeepsNew(t *testing.T) {
 	if err == nil {
 		testutil.True(t, fresh != old, "同 id 重开应产生新的客户端对象")
 	}
-	testutil.Equal(t, 1, mgr.Len(), "同 id 重开不得在 map 里留下两份")
+
+	// 注意不能断言 Len()==1：第二个替身服务"accept 后立即关闭"，
+	// 新客户端连上后随即被对端断开、OnDisconnect 把它自己摘掉是**合法结果**。
+	// 真正不变的性质是下面两条。
+	testutil.True(t, mgr.Len() <= 1,
+		"同 id 重开不得在 map 里留下两份, Len=", mgr.Len())
+
+	cur := mgr.GetClient(id)
+	testutil.True(t, cur == nil || cur == fresh,
+		"表里若仍有该 id，必须是新客户端；老连接被替换后不得复归")
+	testutil.True(t, cur != old, "老客户端绝不应仍占据该 id")
 }
 
 // 回归本次修复**新引入**的风险（务必守住）：
