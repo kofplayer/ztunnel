@@ -42,19 +42,28 @@ func TestLen2_SendData_EmptyPayload(t *testing.T) {
 	testutil.BytesEqual(t, []byte{0, 0}, *wire)
 }
 
-// 表征测试（characterization）：**发送侧不校验 64KB 上限**（报告 L-3）。
-// 载荷超过 65535 字节时 `uint16(len(data))` 静默回绕，对端会按错的长度解析、
-// 把后续字节当成新帧头 → 协议错乱。len4Data 有 MaxFrameSize，len2Data 的
-// 发送侧没有对应保护。本用例钉住当前行为；若加上限校验需同步更新断言。
-func TestLen2_SendData_TruncatesOversizePayload(t *testing.T) {
-	m, wire := sendChain(t)
+// 回归 L-3（已修复）：发送侧原先直接 `uint16(len(data))`，载荷超过 65535 字节时
+// 长度静默回绕，对端按错的长度解析、把剩余字节当成新帧头 → 协议永久错乱且本端
+// 不报任何错。现在必须拒绝。
+func TestLen2_SendData_RejectsOversizePayload(t *testing.T) {
+	// 边界内合法：正好 65535 字节
+	okPayload := make([]byte, MaxFrameSize)
+	m1, wire1 := sendChain(t)
+	testutil.NoError(t, m1.SendData(okPayload), "65535 字节应合法")
+	testutil.Equal(t, 2+len(okPayload), len(*wire1), "合法帧应带 2 字节前缀")
+	testutil.Equal(t, byte(0xFF), (*wire1)[0], "前缀高字节应为 0xFF")
+	testutil.Equal(t, byte(0xFF), (*wire1)[1], "前缀低字节应为 0xFF")
 
-	oversize := make([]byte, 65536+10)
-	testutil.NoError(t, m.SendData(oversize))
+	// 越界必须报错，且不得写出任何字节
+	m2, wire2 := sendChain(t)
+	err := m2.SendData(make([]byte, MaxFrameSize+1))
+	testutil.Error(t, err, "L-3 未修复：超过 2 字节前缀上限的载荷被静默截断而非报错")
+	testutil.Equal(t, 0, len(*wire2), "被拒绝的帧不得写出任何字节")
 
-	header := binary.BigEndian.Uint16((*wire)[:2])
-	testutil.Equal(t, uint16(10), header,
-		"当前实现把 65546 静默截断成 10（报告 L-3）；若已改为报错请更新本用例")
+	// 明显越界：确认判定没写反（旧实现会把 128K+10 报成 10）
+	m3, wire3 := sendChain(t)
+	testutil.Error(t, m3.SendData(make([]byte, 128*1024+10)), "128KB 载荷必须被拒绝")
+	testutil.Equal(t, 0, len(*wire3), "被拒绝的帧不得写出任何字节")
 }
 
 // SendData 不得就地改写调用方的切片——它必须自己分配带前缀的缓冲。

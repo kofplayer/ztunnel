@@ -56,6 +56,12 @@ func (m *Len4Data) ReceiveData(data []byte) error {
 }
 
 func (m *Len4Data) SendData(data []byte) error {
+	// 接收侧有 MaxFrameSize 上限，发送侧此前没有对应校验：本端送出超限帧的
+	// 后果是**对端**拒收并拆掉整条连接，错误表现为对方的断连而不是本端的失败
+	// （审计 L-3 同族问题）。在本端就拒绝，失败点才与原因同侧。
+	if len(data) > MaxFrameSize {
+		return fmt.Errorf("len4Data: frame size %d exceeds limit %d", len(data), MaxFrameSize)
+	}
 	sendData := make([]byte, 4, 4+len(data))
 	binary.BigEndian.PutUint32(sendData[:4], uint32(len(data)))
 	sendData = append(sendData, data...)

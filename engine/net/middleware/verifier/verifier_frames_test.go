@@ -111,11 +111,11 @@ func TestVerifier_SendRoundTripsThroughReceive(t *testing.T) {
 	testutil.BytesEqual(t, payload, rec.Get(0), "剥掉校验字节后应还原为原载荷")
 }
 
-// 表征测试（报告 M-16，**尚未修复**）：`SendData` 用 `data = append(data, c)`，
-// 当调用方切片 cap > len 时会**就地**把校验字节写进调用方的底层数组。该数组
-// 可能正被别的连接持有（例如从接收缓冲零拷贝进发送队列的那条路径），于是变成
-// 静默数据损坏。修复后 spare[2] 应保持哨兵值，届时请更新本用例。
-func TestVerifier_SendData_MutatesCallerBackingArray(t *testing.T) {
+// 回归 M-16（已修复）：`SendData` 原先是 `data = append(data, c)`，当调用方切片
+// cap > len 时会**就地**把校验字节写进调用方的底层数组。那块数组可能正被别的连接
+// 持有（帧是零拷贝进发送队列的），于是变成静默数据损坏。
+// 现在显式新建缓冲：调用方内存一格都不许动。
+func TestVerifier_SendData_DoesNotTouchCallerBackingArray(t *testing.T) {
 	var spare [32]byte
 	for i := range spare {
 		spare[i] = 0xEE // 哨兵值
@@ -127,12 +127,16 @@ func TestVerifier_SendData_MutatesCallerBackingArray(t *testing.T) {
 		return nil
 	}, []netMiddleware.CreateMiddlewareFunc{NewMiddleware}, nil, nil)
 
-	payload := spare[:2] // len=2, cap=32：留有富余
+	payload := spare[:2] // len=2, cap=32：正是旧代码会踩的形态
 	payload[0], payload[1] = 0x0A, 0x0B
 
 	testutil.NoError(t, last.SendData(payload))
 	testutil.Equal(t, 3, len(captured), "线上帧应为 3 字节")
-	testutil.Equal(t, byte(0x03), spare[2],
-		"当前实现把校验字节就地写进了调用方的底层数组（M-16 未修复）；"+
-			"若已改为新建缓冲，此处应保持哨兵值 0xEE，请同步更新本用例")
+	testutil.BytesEqual(t, []byte{0x0A, 0x0B, 0x03}, captured, "线上帧内容不符")
+
+	for i := 2; i < len(spare); i++ {
+		testutil.Equal(t, byte(0xEE), spare[i],
+			"M-16 未修复：校验字节被就地写进调用方底层数组, index", i)
+	}
+	testutil.BytesEqual(t, []byte{0x0A, 0x0B}, spare[:2], "调用方载荷区被改写")
 }
