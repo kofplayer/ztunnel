@@ -30,7 +30,21 @@ func (sm *sessionMgr) NewSession() NetSession {
 	sm.lock.Lock()
 	defer sm.lock.Unlock()
 	// ID 自增必须在锁内：锁外自增在并发创建时会产生重复会话 ID
-	sm.genUId++
+	// （报告 #17）。
+	//
+	// 另外必须**探测空闲槽位**：genUId 是 uint32，回绕后直接
+	// `sessions[id] = v` 会无条件顶掉一个仍在使用的会话——老会话从此再也
+	// 拿不到自己的 map 条目，RemoveSession 也命中不了它，于是永久失联并泄漏
+	// （报告 M-03；inclient 侧同 id 覆盖会造成跨连接串流，那边已加身份核对）。
+	//
+	// 循环可证明终止：只要 map 中会话数 < 2^32（受内存约束必然成立），
+	// 最坏也只是穿过一段连续的已占用 ID 区间。
+	for {
+		sm.genUId++
+		if _, taken := sm.sessions[sm.genUId]; !taken {
+			break
+		}
+	}
 	v.id = sm.genUId
 	sm.sessions[v.id] = v
 	return v

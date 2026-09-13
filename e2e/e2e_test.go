@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -103,29 +104,49 @@ func setupTunnel(t *testing.T, encrypted bool) (uint16, netServer.NetServer) {
 		t.Fatalf("控制端口 %d 未在 10s 内进入监听", ctrlPort)
 	}
 
-	cli := outclient.NewClient("127.0.0.1", ctrlPort, exportPort, "127.0.0.1", echoPort)
-
-	// 与 cmd/client.go 同构的重试循环：任何一次 Start 返回就隔 200ms 再来，
-	// 直到 export 端口能被连上。
+	// 与 cmd/client.go 同构的重连循环：每轮**新建一个 client**，Start 返回后隔
+	// 200ms 再来，直到 export 端口能被连上。
+	//
+	// 必须新建实例：netClient 连同其 connector 是一次性的（报告 M-12），复用同一
+	// 个实例从第二轮起只会一直报 "not idle"，隧道再也起不来。
+	var mu sync.Mutex
+	current := outclient.NewClient("127.0.0.1", ctrlPort, exportPort, "127.0.0.1", echoPort)
 	stop := make(chan struct{})
 	loopDone := make(chan struct{})
+	t.Cleanup(func() {
+		close(stop)
+		// 必须先 Stop 当前实例：循环可能正阻塞在 Start() 里，不断开连接它不返回。
+		mu.Lock()
+		c := current
+		mu.Unlock()
+		_ = c.Stop()
+		<-loopDone
+	})
+
 	go func() {
 		defer close(loopDone)
 		for {
-			_ = cli.Start()
+			mu.Lock()
 			select {
 			case <-stop:
+				mu.Unlock()
+				return
+			default:
+			}
+			cli := outclient.NewClient("127.0.0.1", ctrlPort, exportPort, "127.0.0.1", echoPort)
+			current = cli
+			mu.Unlock()
+
+			_ = cli.Start()
+
+			select {
+			case <-stop:
+				_ = cli.Stop()
 				return
 			case <-time.After(200 * time.Millisecond):
 			}
 		}
 	}()
-	t.Cleanup(func() {
-		close(stop)
-		// 必须先 Stop：循环可能正阻塞在 Start() 里，不断开连接它不会返回。
-		_ = cli.Stop()
-		<-loopDone
-	})
 
 	if !testutil.Eventually(t, 15*time.Second, func() bool { return canDial(exportPort) }) {
 		t.Fatalf("隧道未在 15s 内建立：export 端口 %d 始终无法连接", exportPort)

@@ -1,10 +1,14 @@
 package queueImpRing
 
 import (
+	"errors"
 	"sync"
 )
 
-// Queue 表示一个缓冲区无限大的channel
+// Queue 是一个带条件变量的阻塞队列。
+//
+// 它自身仍可无限扩容（Push → RingBuffer 翻倍）；**经 QQueue 使用时默认受长度
+// 上限约束**（SendLimited + DefaultSendQueueLimit），见报告 M-17。
 type Queue[T any] struct {
 	buffer      *RingBuffer[T] // 用于存储数据的链表
 	mutex       sync.Mutex     // 互斥锁，保证并发安全
@@ -23,6 +27,37 @@ func NewQueue[T any](baseBufferCount int) *Queue[T] {
 	}
 	ch.notEmpty = sync.NewCond(&ch.mutex)
 	return ch
+}
+
+// ErrClosed 表示队列已关闭（连接已断开）。包级哨兵，供 errors.Is 判定。
+var ErrClosed = errors.New("queue: closed")
+
+// ErrFull 表示队列长度已达上限，拒绝继续入队（背压信号）。
+//
+// 修复 M-17：发送队列原本是**只增不减**的——`RingBuffer.Push` 满了就
+// `size*2` 无限翻倍扩容，慢消费者 + 快生产者的场景下内存可以被无界拉高，
+// 直到 `make` 分配失败在**调用方 goroutine** 里 panic（不是有 recover 兜底的
+// 收发循环，而可能是业务 goroutine）。有了上限，积压变成一条可判定的错误。
+var ErrFull = errors.New("queue: length limit reached")
+
+// SendLimited 在**同一把锁内**完成"已关闭 / 超限 / 入队"三件事。
+//
+// 不提供"先 Len() 再 Send()"的写法：那两步之间有竞态，突发并发下会把上限
+// 冲过去。maxLen <= 0 表示不限长（保持旧语义）。
+func (ch *Queue[T]) SendLimited(value T, maxLen int) error {
+	ch.mutex.Lock()
+	if ch.closed {
+		ch.mutex.Unlock()
+		return ErrClosed
+	}
+	if maxLen > 0 && ch.buffer.Count() >= maxLen {
+		ch.mutex.Unlock()
+		return ErrFull
+	}
+	ch.buffer.Push(value)
+	ch.mutex.Unlock()
+	ch.notEmpty.Signal()
+	return nil
 }
 
 // Send 向channel发送数据

@@ -38,15 +38,49 @@ func TestCodecType8_DecodeTooShort(t *testing.T) {
 	testutil.Error(t, err)
 }
 
-// 固化现状：type8 用 uint8 承载 msgID，大于 255 时静默截断。
-// 当前协议 msgID ≤ 4 无影响，但扩展协议前必须处理（报告 #17 杂项）。
-func TestCodecType8_MsgIDTruncation_CurrentBehavior(t *testing.T) {
+// 回归 L-2：type8 的 msgID 由 1 字节承载，原先 `uint8(t)` 会**静默截断**——
+// 调用方以为发的是 300，对端解出来是 44，属于不会报错的协议损坏。
+// （本用例原先固化的是"截断即现状"，修复后改为断言明确拒绝。）
+func TestCodecType8_MsgIDTooWide_IsRejected(t *testing.T) {
 	c := NewCodec_type8_data()
-	out, err := c.Encode(0, 300, nil)
+
+	// 边界内仍可正常往返
+	out, err := c.Encode(0, 255, []byte("x"))
+	testutil.NoError(t, err, "msgID=255 应合法")
+	_, id, got, err := c.Decode(out)
 	testutil.NoError(t, err)
-	_, id, _, err := c.Decode(out)
-	testutil.NoError(t, err)
-	testutil.Equal(t, uint32(300&0xFF), id)
+	testutil.Equal(t, uint32(255), id)
+	testutil.BytesEqual(t, []byte("x"), got)
+
+	// 越界必须报错且不产出任何字节
+	_, err = c.Encode(0, 256, nil)
+	testutil.Error(t, err, "L-2 未修复：msgID=256 被静默截断")
+	_, err = c.Encode(0, 300, []byte("abc"))
+	testutil.Error(t, err, "L-2 未修复：msgID=300 被静默截断")
+	_, err = c.Encode(0, 1<<32-1, nil)
+	testutil.Error(t, err, "L-2 未修复：极大 msgID 被静默截断")
+}
+
+// 另两个 codec 的同族边界。
+func TestCodecOtherWidths_Rejected(t *testing.T) {
+	c16 := NewCodec_type16_data()
+	if _, err := c16.Encode(0, 65535, nil); err != nil {
+		t.Fatalf("msgID=65535 应合法: %v", err)
+	}
+	if _, err := c16.Encode(0, 65536, nil); err == nil {
+		t.Fatal("L-2 未修复：type16 对 msgID=65536 静默截断")
+	}
+
+	cb8 := NewCodec_cb8_type16_data()
+	if _, err := cb8.Encode(255, 65535, nil); err != nil {
+		t.Fatalf("cb=255/msgID=65535 应合法: %v", err)
+	}
+	if _, err := cb8.Encode(256, 0, nil); err == nil {
+		t.Fatal("L-2 未修复：cb=256 被 uint8 静默截断")
+	}
+	if _, err := cb8.Encode(0, 65536, nil); err == nil {
+		t.Fatal("L-2 未修复：msgID=65536 被 uint16 静默截断")
+	}
 }
 
 func TestCodecType16_Roundtrip(t *testing.T) {

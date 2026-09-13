@@ -30,6 +30,15 @@ type NetClient interface {
 }
 
 type netClient struct {
+	// state 守卫 Connect/Disconnect 的调用时机（报告 M-12）。
+	//
+	// 重复 Connect() 的后果曾被"调用方每轮新建实例"侥幸掩盖：它会重建一条
+	// 中间件链并覆盖 lastMiddleware（主 goroutine 写、**旧**连接的 receiver
+	// goroutine 并发读），再对同一个 ConnectorSocket 拨号覆盖底层 conn，于是
+	// 旧 fd 与两个 goroutine 永久残留；而 SetOnDisconnect 被改指向新链，旧连接
+	// 断开时的清理会打到新链上。靠自律不是靠类型。
+	state atomic.Int32
+
 	connector                netConnect.Connector
 	codec                    netCodec.Codec
 	onConnect                func()
@@ -39,6 +48,19 @@ type netClient struct {
 	middlewareCreateFuncList []func() netMiddleware.Middleware
 	lastMiddleware           netMiddleware.Middleware
 }
+
+const (
+	stateIdle       int32 = 0
+	stateConnecting int32 = 1
+	stateReady      int32 = 2
+	// stateDone 是终态：这个实例（连同它的 connector）已经用过了。
+	//
+	// 为什么不允许"断开后再 Connect"：那会对**同一个** ConnectorSocket 二次
+	// 拨号并覆盖底层 conn，旧 fd 与两个 goroutine 永久残留——正是 M-12 要防的
+	// 行为。守卫若留了这个后门就形同虚设。重连必须构造新实例
+	// （cmd/client 的重连循环本来就是这么写的）。
+	stateDone int32 = 3
+)
 
 func (c *netClient) SetConnector(connector netConnect.Connector) {
 	c.connector = connector
@@ -68,7 +90,27 @@ func (c *netClient) SetOnMessage(f func(cb uint32, msgID uint32, data []byte) er
 	c.onMessage = f
 }
 
+// Connect 组装中间件链、拨号并等待握手完成。
+//
+// 只能从 Idle 状态调用一次：Connecting/Ready/Done 时调用会直接报错，而不是悄悄
+// 造出两条链、漏掉旧连接的 fd 与 goroutine（报告 M-12）。
 func (c *netClient) Connect() error {
+	if !c.state.CompareAndSwap(stateIdle, stateConnecting) {
+		return fmt.Errorf("client: Connect allowed once per instance, not idle (state=%d); "+
+			"construct a new client to reconnect", c.state.Load())
+	}
+	err := c.connect()
+	if err != nil {
+		// 落终态而不是回 Idle：拨号可能已经建立了半开连接，再 Connect 一次
+		// 就是对同一个 ConnectorSocket 二次拨号。
+		c.state.Store(stateDone)
+		return err
+	}
+	c.state.Store(stateReady)
+	return nil
+}
+
+func (c *netClient) connect() error {
 	firstMiddleware := netMiddlewareCommon.NewMiddlewareFirst(func(data []byte) error {
 		return c.connector.SendData(data)
 	})
@@ -114,6 +156,9 @@ func (c *netClient) Connect() error {
 	})
 	c.connector.SetOnDisconnect(func() {
 		firstMiddleware.FireEvent(netMiddleware.MiddlewareEventOnDisconnect)
+		// 断开即终态：落到 Done，防止有人拿同一个实例重连（报告 M-12）。
+		c.state.CompareAndSwap(stateReady, stateDone)
+		c.state.CompareAndSwap(stateConnecting, stateDone)
 		if c.onDisconnect != nil {
 			c.onDisconnect()
 		}
@@ -153,7 +198,11 @@ func (c *netClient) Connect() error {
 }
 
 func (c *netClient) Disconnect() error {
-	return c.connector.Disconnect()
+	err := c.connector.Disconnect()
+	// 主动断开同样是终态：一个实例只负责一次连接（报告 M-12）
+	c.state.CompareAndSwap(stateReady, stateDone)
+	c.state.CompareAndSwap(stateConnecting, stateDone)
+	return err
 }
 
 func (c *netClient) SendMessage(cb uint32, msgID uint32, data []byte) error {

@@ -70,18 +70,18 @@ First ──> mw1 ──> mw2 ──> ... ──> Last
 
 ## connect/socket/ — TCP 实现
 
-- `ConnSocket`：**每连接固定 2 个 goroutine**（`receiverRun`/`senderRun`）；发送走无界队列（见 [../CLAUDE.md](../CLAUDE.md) queue 节，初始容量 32），读缓冲 4096B 直读 `conn`（原先另有一层 `bufio.Reader`，因只调 `Read` 且缓冲等长而完全不生效，已删除）。
+- `ConnSocket`：**每连接固定 2 个 goroutine**（`receiverRun`/`senderRun`）；发送走带长度上限的队列（见 [../CLAUDE.md](../CLAUDE.md) queue 节，初始容量 32），读缓冲 4096B 直读 `conn`（原先另有一层 `bufio.Reader`，因只调 `Read` 且缓冲等长而完全不生效，已删除）。
 - **断开语义 = `disconnectOnce` 保证「所有关闭路径恰好派发一次 OnDisconnect」**：`Disconnect()`（关队列 + 通知）、`Abort()`（关队列 + 立即关 TCP + 通知）、`receiverRun` 的读/处理错误、`senderRun` 的写错误、`recoverPanic` 五条路径统一走 `fireDisconnect()`。
   - ⚠️ **绝不能**改用 `q.IsClose()` 做门：该谓词描述队列状态、与「业务是否已通知」无关，而主动 Close 会先关队列——历史上正是它让 `RemoveSession`（全仓唯一调用点在 netServer 的断开闭包里）在主动关闭路径上整体不执行（报告 SEC-01）。
   - ⚠️ 断开通知在**调用 goroutine 内同步**跑完整条链，因此持锁路径不得调 `Disconnect()`/`Close()`，否则重入业务自己的锁即自死锁。
 - `senderRun` 写失败必须 `Abort()`：此前是裸 `return`，既不关 fd（全仓再无别处关它）也不关队列，导致 fd 永久泄漏 + `SendData` 恒"成功"地把数据堆进无人消费的队列（报告 LEAK-02）。
 - `ConnectorSocket`：内嵌 ConnSocket，`Connect()` 拨号 + keepalive(30s) + 起收发 goroutine；`onConnectFunc` 判空后调用。
 - `AcceptorSocket`：`Listen()` 预绑定端口（判"已绑定且未关闭"，故 `Stop()` 后能真正重绑并如实报错）；`Start()` 复用已绑定 listener，**入口绑定一次、循环内不再重绑**（否则会把被 Stop 的端口重新占上）；`Stop()` 复位 `listener` 字段并回传关闭错误；`Accept` 的临时错误指数退避重试，仅 `net.ErrClosed`/已 Stop 才终止。
+- 发送队列**带长度上限**（M-17 已修）：积压达到 `DefaultSendQueueLimit`（默认 64K 帧）时 `Enqueue` 返回哨兵 `ErrFull`，与 `ErrClosed` 可用 `errors.Is` 区分；上限判定与入队在**同一次加锁**内完成（`Queue.SendLimited`），不存在"先看长度再入队"的检查-使用竞态。仍无流量整形——触发上限的表现是该连接被判错误关闭，真正的限速/优先级另议。
 - **recover 兜底**：`receiverRun`/`senderRun` 入口、accept 回调（`safeAccept`）、以及 **client 侧拨号 goroutine**（2026-09-13 补，原先缺失）均 recover——链上/业务 handler 的任何 panic 按「关闭该连接」处理，单连接异常不杀进程。注意 `netSession.Close()` 不再把 `conn` 置 nil，断开回调里仍可取 `RemoteAddr()` 记日志。
 
 ⚠️ **健壮性缺口（已知，未修）**：
-- 发送队列**无界**（满则翻倍）：慢消费者 + 快生产者持续吃内存，无背压；`Push` 用 `make` 扩容，溢出时会在**调用方 goroutine**里 panic。
 - **无应用层心跳**：仅 TCP keepalive，NAT 映射失效/半开连接双方长期无感知。
 - **握手阶段无任何超时、无连接数上限**：对端完成三次握手后静默即可让服务端的会话 + 2 个 goroutine + 整条中间件实例永久驻留（**预认证**资源耗尽）；客户端 `Connect()` 可无限阻塞。TCP keepalive 杀得死死对端，杀不死"活着但不握手"。
-- 稳态连接也**无读写 deadline**；未设 `TCP_NODELAY`（交互式协议延迟受损）。
+- 稳态连接也**无读写 deadline**。（曾疑为"未设 `TCP_NODELAY`"，执行阶段核实：Go 标准库 `net/tcpsock.go` 的 `newTCPConn` 第一行即 `setNoDelay(fd, true)`，拨号与 accept 出的每条 TCP 连接都经它 —— **TCP_NODELAY 本就默认启用**，原判断不成立。）
 - 无半关闭语义：任一方向 FIN 即双向拆除。
