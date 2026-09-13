@@ -35,10 +35,20 @@ func TestGetHostAndPort(t *testing.T) {
 	}
 }
 
-// 回归：应支持 IPv6 字面量。host 保留方括号返回，保证 host+":"+port 可直接用于 net.Dial。
+// 回归：应支持 IPv6 字面量。host 以**不带方括号**的裸主机返回，
+// 调用方必须用 net.JoinHostPort 拼接，不得手写 host+":"+port。
 func TestGetHostAndPort_IPv6(t *testing.T) {
 	host, port, err := GetHostAndPort("[::1]:8888")
 	testutil.NoError(t, err, "回归未修复：应支持 IPv6 地址 [::1]:8888")
-	testutil.Equal(t, "[::1]", host)
+	testutil.Equal(t, "::1", host)
 	testutil.Equal(t, uint16(8888), port)
+}
+
+// 回归：未加方括号的 IPv6 与多冒号地址必须明确报错，而不是静默误解析
+// （此前 "::1" 会被拆成 host="::"、port=1，拨号地址与真实原因完全无关）。
+func TestGetHostAndPort_RejectsAmbiguous(t *testing.T) {
+	for _, in := range []string{"::1", "10.0.0.1:33:80", "[::1]", "2001:db8::1:8080"} {
+		_, _, err := GetHostAndPort(in)
+		testutil.Error(t, err, "应拒绝歧义地址", in)
+	}
 }

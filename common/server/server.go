@@ -38,13 +38,3 @@ func NewServer(host string, port uint16, handler IServerHandler, codec netCodec.
 	})
 	return svr
 }
-
-func StartServer(svr netServer.NetServer) error {
-	go func() {
-		err := svr.Start()
-		if err != nil {
-			panic(err)
-		}
-	}()
-	return nil
-}

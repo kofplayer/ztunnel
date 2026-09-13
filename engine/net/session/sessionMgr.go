@@ -15,6 +15,7 @@ type SessionMgr interface {
 	RemoveSession(sID SessionID)
 	GetSession(sID SessionID) NetSession
 	TravelSession(f func(s NetSession) bool)
+	Len() int
 }
 
 type sessionMgr struct {
@@ -52,11 +53,30 @@ func (sm *sessionMgr) GetSession(sID SessionID) NetSession {
 }
 
 func (sm *sessionMgr) TravelSession(f func(s NetSession) bool) {
+	// 锁内只做快照，回调一律在锁外执行。
+	//
+	// 回调链可能反过来拿这把锁的**写锁**：Stop() 的回调是 s.Close()，而断开
+	// 通知现在会派发到 netServer 的 RemoveSession。RWMutex 在有 writer 排队时
+	// 会阻塞后续 RLock，同 goroutine 内持 RLock 调 RemoveSession 即自死锁
+	// （报告 M-11）。持 RLock 跑回调还会让期间所有断连清理被串行阻塞。
 	sm.lock.RLock()
-	defer sm.lock.RUnlock()
+	snapshot := make([]NetSession, 0, len(sm.sessions))
 	for _, v := range sm.sessions {
-		if !f(v) {
-			break
+		snapshot = append(snapshot, v)
+	}
+	sm.lock.RUnlock()
+
+	for _, s := range snapshot {
+		if !f(s) {
+			return
 		}
 	}
+}
+
+// Len 返回当前会话数。供运行时监控与测试断言"会话已被回收"使用——
+// 没有这个接口，map 泄漏类问题在测试里几乎无法断言（报告 E-09）。
+func (sm *sessionMgr) Len() int {
+	sm.lock.RLock()
+	defer sm.lock.RUnlock()
+	return len(sm.sessions)
 }

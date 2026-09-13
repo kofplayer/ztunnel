@@ -73,13 +73,27 @@ cd cmd && ./build.bat
 - **字节序**：协议字段一律大端。
 - **命名风格**：接收者名混用 `this`/`c`/`m`（历史遗留），新代码遵循就近文件已有风格。
 
-## 已知问题（修改相关代码前必读，细节在对应模块文档）
+## 已知问题与硬约束（修改相关代码前必读，细节在对应模块文档）
+
+### 改代码前必须遵守的不变式
+
+| 约束 | 原因 |
+|---|---|
+| **持锁路径绝不调用 `Disconnect()`/`Close()`** | 断开通知现在会在调用 goroutine 内**同步**派发整条 OnDisconnect 链，重入业务自己的锁即自死锁。既有两处已修（`netServer` 四回调判空、`ClientMgr.CloseAllClient` 锁内快照锁外断连）；新代码同遵 |
+| **`FireEvent` 只能在接完整的链上调用** | 链头若不是 `NetMiddlewareFirst`，`First()` 会返回自身导致 `FireEvent` **无限自我递归 → 栈溢出**，而 Go 的栈溢出是 fatal error，`recover` 拦不住（CRASH-04，已加守卫 + 崩溃探针用例） |
+| **type1 锁序固定为 `sendMu → mu`** | 持 `mu` 再取 `sendMu` 会与握手路径形成 AB-BA 死锁；握手末帧必须在该串行域内交付 |
+| **`-net_encrypt=true` 两端必须同版本** | 2026-09-13 的掩码修正（CRYPT-01）与 2048 公钥策略下限都是**线上断代**改动，新旧混跑握手必然失败。协议至今无版本字段 |
+
+### 仍然存在的问题
 
 | 问题 | 位置 |
 |---|---|
-| `build.bat` 产物落在 `cmd/` 而非仓库根目录 | [cmd/CLAUDE.md](cmd/CLAUDE.md) |
-| **token 为空（默认）即无鉴权**，且无端口白名单/申请限速——持任意 token 的客户端可要求服务端监听任意端口 | [common/CLAUDE.md](common/CLAUDE.md) / [server/CLAUDE.md](server/CLAUDE.md) |
-| 加密握手用 RSA-1024（强度弱，属设计取舍） | [engine/net/middleware/CLAUDE.md](engine/net/middleware/CLAUDE.md) |
-| type1 自研加密为 8 字节掩码 XOR 且无服务端身份验证（公钥不固定），仅能对抗被动窃听，主动 MITM 可解密全部流量；建议迁移 `crypto/tls`（标准库，仍满足零依赖约束） | [engine/net/middleware/CLAUDE.md](engine/net/middleware/CLAUDE.md) |
-| 健壮性缺口：无应用层心跳（NAT 半开连接无感知）、发送队列无界（慢消费者内存增长）、无连接/读写超时、未设 TCP_NODELAY | [engine/net/CLAUDE.md](engine/net/CLAUDE.md) |
+| **token 为空（默认）即无鉴权**，且无端口白名单/申请限速——持任意 token 的客户端可要求服务端监听任意端口。启动时会打 `SECURITY:` 告警，但仍靠运维自觉 | [common/CLAUDE.md](common/CLAUDE.md) / [server/CLAUDE.md](server/CLAUDE.md) |
+| **`-net_encrypt` 是混淆不是加密**：无服务端身份验证（主动 MITM 可拿下 token 并解全部流量）、无 MAC（verifier 的 XOR 和对字节置换不变）、帧长在最外层明文、服务端 RSA 私钥全连接共用 → 无前向保密。根治 = 迁移 `crypto/tls` + 公钥 pinning | [engine/net/middleware/CLAUDE.md](engine/net/middleware/CLAUDE.md) |
+| 健壮性缺口：无应用层心跳（NAT 半开连接无感知）、发送队列无界（慢消费者内存增长）、**握手阶段无超时且无连接数上限**（预认证资源耗尽）、未设 TCP_NODELAY | [engine/net/CLAUDE.md](engine/net/CLAUDE.md) |
+| 无半关闭语义：任一方向 FIN 即双向拆除，`Connection: close` / `nc` / SMTP-FTP `QUIT` 类协议会看到响应截断 | [server/CLAUDE.md](server/CLAUDE.md) |
+| `log` 包轮转无同步（fd 泄漏/日志丢失/竞态），`Fatal` 级别既不 exit 也不区别对待；日志落相对路径 `./log`，**无大小上限、无清理** | [engine/CLAUDE.md](engine/CLAUDE.md) |
+| `OpenClient` 在控制通道唯一 receiver goroutine 上同步拨号 → 单条用户连接可头阻塞整条隧道；用户一连上即拨内网服务且无每隧道上限 | [client/CLAUDE.md](client/CLAUDE.md) |
+| 会话 ID 为 uint32 自增且**绝不复用**（无串流风险），但回绕后 `sessions[id]` 会被静默覆盖（`OpenClient` 已加身份核对，`NewSession` 尚未） | [engine/net/CLAUDE.md](engine/net/CLAUDE.md) |
 | ws 传输层整体被注释掉，仅 socket 可用 | [engine/net/CLAUDE.md](engine/net/CLAUDE.md) |
+| `engine/net/connect/ws/` 189 行注释代码常驻树中，建议移入分支或删除 | — |

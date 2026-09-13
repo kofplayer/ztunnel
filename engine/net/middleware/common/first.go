@@ -39,13 +39,25 @@ func (m *NetMiddlewareFirst) FireEvent(e netMiddleware.MiddlewareEvent) {
 	m.firingEvent = true
 	m.mu.Unlock()
 
+	// 复位必须放进 defer：OnEvent 可能 panic（type1 的状态守卫就是显式 panic）。
+	// 那样 firingEvent 会永远停在 true，而执行它的 goroutine 已经没了 ——
+	// 此后这条链上的所有事件（包括 OnDisconnect）只入队、永不派发，
+	// 中间件的握手状态与密钥字段也不做任何清理（报告 CRASH-03）。
+	//
+	// 已排队的事件**保留**不清空：上游的 recoverPanic 会紧接着触发 OnDisconnect，
+	// 届时 firingEvent 已复位，那次派发会顺手把积压事件一起排空。
+	defer func() {
+		m.mu.Lock()
+		m.firingEvent = false
+		m.mu.Unlock()
+	}()
+
 	// OnEvent 必须在锁外执行：回调中可能再次 FireEvent（由 firingEvent
 	// 标记处理重入），也可能发起同连接的 SendData。
 	m.OnEvent(e)
 	for {
 		m.mu.Lock()
 		if len(m.events) == 0 {
-			m.firingEvent = false
 			m.mu.Unlock()
 			break
 		}

@@ -17,7 +17,11 @@ import (
 	"ztunnel/server/outserver"
 )
 
-func NewServer(host string, port uint16) netServer.NetServer {
+// NewServer 构造控制通道服务端。host 为控制监听绑定地址（空=通配）；
+// exportIP 为各隧道公网暴露端口的绑定地址（空=通配）。
+// 二者必须真正透传——此前 host 被硬编码为 ""，写 -listen=127.0.0.1:8888
+// 实际仍是 0.0.0.0 全网卡暴露（报告 SEC-02）。
+func NewServer(host string, port uint16, exportIP string) netServer.NetServer {
 	var middlewares []netMiddleware.CreateMiddlewareFunc
 	if proto.NetEncrypt {
 		middlewares = []netMiddleware.CreateMiddlewareFunc{
@@ -31,11 +35,12 @@ func NewServer(host string, port uint16) netServer.NetServer {
 			type0NetEncrypt.CreateServerNetEncryptFunc(),
 		}
 	}
-	svr := zServer.NewServer("", port, &handler{}, netCodec.NewCodec_type8_data(), middlewares)
+	svr := zServer.NewServer(host, port, &handler{exportIP: exportIP}, netCodec.NewCodec_type8_data(), middlewares)
 	return svr
 }
 
 type handler struct {
+	exportIP string
 }
 
 func (h *handler) OnConnect(s netSession.NetSession) {
@@ -56,6 +61,13 @@ func (h *handler) OnDisconnect(s netSession.NetSession) {
 }
 
 func (h *handler) OnMessage(s netSession.NetSession, cb uint32, msgID uint32, data []byte) error {
+	// 建隧道应答发送失败必须可见（报告 M-18）：这条控制通道本身已经不可靠了。
+	replyCode := func(s netSession.NetSession, code byte) {
+		if err := s.SendMessage(0, proto.MsgIdCreateTunnel, []byte{code}); err != nil {
+			log.Main().Error("reply CreateTunnel(%v) to %v fail: %v", code, s.GetConn().RemoteAddr(), err)
+		}
+	}
+
 	switch msgID {
 	case proto.MsgIdCreateTunnel:
 		if len(data) != proto.TokenLen+2 {
@@ -67,21 +79,21 @@ func (h *handler) OnMessage(s netSession.NetSession, cb uint32, msgID uint32, da
 			return fmt.Errorf("data error2")
 		}
 		token := string(data[:proto.TokenLen])
-		if token != proto.Token {
+		if !proto.TokenMatches(token) {
 			log.Main().Warn("client %v token error", s.GetConn().RemoteAddr())
 			return fmt.Errorf("token error")
 		}
 		outPort := binary.BigEndian.Uint16(data[proto.TokenLen:])
 		if outPort == 0 {
 			log.Main().Warn("client %v invalid out port 0", s.GetConn().RemoteAddr())
-			s.SendMessage(0, proto.MsgIdCreateTunnel, []byte{proto.ErrorCodeNormal})
+			replyCode(s, proto.ErrorCodeNormal)
 			return nil
 		}
-		svr := outserver.NewServer("", outPort, s)
+		svr := outserver.NewServer(h.exportIP, outPort, s)
 		// 同步绑定端口：失败立即回错误码，避免异步 Start 失败被吞后的"假成功"（报告 #8）
 		if err := svr.Listen(); err != nil {
 			log.Main().Warn("client %v create tunnel on port %v fail: %v", s.GetConn().RemoteAddr(), outPort, err)
-			s.SendMessage(0, proto.MsgIdCreateTunnel, []byte{proto.ErrorCodeNormal})
+			replyCode(s, proto.ErrorCodeNormal)
 			return nil
 		}
 		s.SetBindObject(svr)
@@ -92,7 +104,7 @@ func (h *handler) OnMessage(s netSession.NetSession, cb uint32, msgID uint32, da
 				svr.Stop()
 			}
 		}()
-		s.SendMessage(0, proto.MsgIdCreateTunnel, []byte{proto.ErrorCodeNone})
+		replyCode(s, proto.ErrorCodeNone)
 	case proto.MsgIdConnectNew:
 		if len(data) != netSession.SessionIDSize+1 {
 			log.Main().Warn("client %v data error3", s.GetConn().RemoteAddr())
@@ -135,8 +147,17 @@ func (h *handler) OnMessage(s netSession.NetSession, cb uint32, msgID uint32, da
 		}
 		connectId := proto.ReadSessionId(data[:netSession.SessionIDSize])
 		session := outServer.GetSessionMgr().GetSession(connectId)
-		if session != nil {
-			session.SendMessage(0, 0, data[netSession.SessionIDSize:])
+		if session == nil {
+			// 此前静默丢弃：客户端转发过来的数据找不到对应用户会话，无任何痕迹
+			log.Main().Warn("client %v: no user session for connectId %v, drop %v bytes",
+				s.GetConn().RemoteAddr(), connectId, len(data)-netSession.SessionIDSize)
+			return nil
+		}
+		if err := session.SendMessage(0, 0, data[netSession.SessionIDSize:]); err != nil {
+			// 写失败说明这条用户连接已废：关掉它让用户及时收到 FIN，
+			// 而不是继续把后续数据倒进黑洞（报告 M-18）。
+			log.Main().Error("forward to user session %v fail: %v, closing it", connectId, err)
+			_ = session.Close()
 		}
 	}
 	return nil

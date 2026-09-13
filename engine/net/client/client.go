@@ -2,6 +2,7 @@ package client
 
 import (
 	"errors"
+	"fmt"
 	"sync/atomic"
 
 	netCodec "ztunnel/engine/net/codec"
@@ -88,6 +89,9 @@ func (c *netClient) Connect() error {
 		if err != nil {
 			return err
 		}
+		if c.onMessage == nil {
+			return nil
+		}
 		return c.onMessage(cb, msgID, msgData)
 	}, func() {
 		atomic.StoreInt32(&handshakeComplete, 1)
@@ -124,6 +128,20 @@ func (c *netClient) Connect() error {
 		return firstMiddleware.ReceiveData(data)
 	})
 	go func() {
+		// 必须 recover：Connect() 会在本 goroutine 内同步执行 onConnectFunc
+		// （= FireEvent(OnConnect) + 业务 onConnect），type1 的状态守卫会 panic。
+		// server 侧有 safeAccept 兜底，client 侧此前完全没有 → 单连接异常杀死
+		// 整个进程（报告 ROBUST-01）。
+		// ⚠️ 恢复后**必须**向 result 投递：漏投递 = Connect() 永久阻塞，
+		// 比 panic 更难查（连接既不成功也不报错，只是挂着）。
+		defer func() {
+			if r := recover(); r != nil {
+				select {
+				case result <- fmt.Errorf("connect panic: %v", r):
+				default:
+				}
+			}
+		}()
 		if err := c.connector.Connect(); err != nil {
 			select {
 			case result <- err:
@@ -139,6 +157,12 @@ func (c *netClient) Disconnect() error {
 }
 
 func (c *netClient) SendMessage(cb uint32, msgID uint32, data []byte) error {
+	// lastMiddleware 只在 Connect() 内赋值：未连接（或 Connect 已失败）就
+	// SendMessage 会对 nil 接口调用 → panic。与 netSession.SendMessage 的
+	// 既有处理保持一致，返回 error（报告 L-12）。
+	if c.lastMiddleware == nil {
+		return errors.New("client not connected")
+	}
 	pkgData, err := c.codec.Encode(cb, msgID, data)
 	if err != nil {
 		return err

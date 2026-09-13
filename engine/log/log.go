@@ -9,14 +9,22 @@ import (
 	"time"
 )
 
-var _mainLog Log
+// _mainLog 用 atomic 存放：SetMainLog 写、Main 读可能发生在不同 goroutine。
+// 这不只是理论问题——上一个用例遗留的接收 goroutine 在 OnDisconnect 里读
+// log.Main()，与下一个用例的 SetMainLog 并发，已被 -race 实测报出 DATA RACE
+// （报告 L-9）。
+var _mainLog atomic.Pointer[Log]
 
 func SetMainLog(l Log) {
-	_mainLog = l
+	_mainLog.Store(&l)
 }
 
 func Main() Log {
-	return _mainLog
+	p := _mainLog.Load()
+	if p == nil {
+		return nil
+	}
+	return *p
 }
 
 func NewLog() Log {

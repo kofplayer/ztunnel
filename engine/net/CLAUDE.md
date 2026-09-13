@@ -47,7 +47,11 @@ First ──> mw1 ──> mw2 ──> ... ──> Last
 ## session/ — 会话
 
 - `SessionID = uint32`，`SessionIDSize = 4`（协议中 connectId 的字节数）。
-- `SessionMgr`：自增 ID 分配（**锁内自增**）+ map 管理，`NewSession`/`RemoveSession`/`GetSession`/`TravelSession`（读写锁保护）。
+- `SessionMgr`：自增 ID 分配（**锁内自增**）+ map 管理，`NewSession`/`RemoveSession`/`GetSession`/`TravelSession`/`Len`（读写锁保护）。
+  - `TravelSession` **锁内只做快照、回调一律在锁外**：回调链可能反过来取写锁（`Close` → 断开通知 → `RemoveSession`），而 `RWMutex` 不记持有者、writer 排队时又会阻塞后续 `RLock` → 同 goroutine 内即自死锁。回调必须对已被并发改动的会话幂等。
+  - `Len()` 供运行时监控与测试断言"会话已被回收"——没有它，map 泄漏几乎无法断言。
+- `netSession` 的 `conn`/`bindObject`/`sendMessageFunc` 由内部 `RWMutex` 保护（它们会被**其它连接的** goroutine 读写，例如 inserver 在控制通道 receiver 上对用户会话调 `Close()`）。持锁纪律：`Close()` 只取引用即解锁，**不得**持锁跨过 `Disconnect()`。
+- `Close()` **不再**把 `conn` 置 nil——OnDisconnect 回调仍需用它取 `RemoteAddr()` 记日志；`net.Conn` 关闭后调 `RemoteAddr()` 是安全的，幂等性由 `ConnSocket.disconnectOnce` 负责。
 - `SendMessageFunc` 未设置时 `SendMessage` 返回 error（会话注册进 map 与回调绑定之间存在窗口，不可 nil 调用）。
 - `bindObject`：`SetBindObject/GetBindObject`（`interface{}` 附加槽），inserver 用它把 outserver 绑到控制会话（见 [../../server/CLAUDE.md](../../server/CLAUDE.md)）。
 
@@ -66,13 +70,18 @@ First ──> mw1 ──> mw2 ──> ... ──> Last
 
 ## connect/socket/ — TCP 实现
 
-- `ConnSocket`：**每连接固定 2 个 goroutine**（`receiverRun`/`senderRun`）；发送走无界队列（见 [../CLAUDE.md](../CLAUDE.md) queue 节，初始容量 32），读缓冲 4096B。
-- **recover 兜底**：`receiverRun`/`senderRun` 入口与 accept 回调（`safeAccept`）均 recover——链上/业务 handler 的任何 panic 按「关闭该连接」处理（`Abort()`：关发送队列 + 立即关 TCP），单连接异常不杀进程。
-- 断开语义 = 关队列（`senderRun` 排空退出并关 TCP）+ 触发 `onDisconnectFunc`（单次；q 已关时跳过，防重复触发）。
-- `ConnectorSocket`：内嵌 ConnSocket，`Connect()` 拨号 + keepalive(30s) + 起收发 goroutine。
-- `AcceptorSocket`：`Listen()` 预绑定端口；`Start()` 复用已绑定 listener（否则自行绑定）后阻塞 accept 循环（返回即 listener 出错）。
+- `ConnSocket`：**每连接固定 2 个 goroutine**（`receiverRun`/`senderRun`）；发送走无界队列（见 [../CLAUDE.md](../CLAUDE.md) queue 节，初始容量 32），读缓冲 4096B 直读 `conn`（原先另有一层 `bufio.Reader`，因只调 `Read` 且缓冲等长而完全不生效，已删除）。
+- **断开语义 = `disconnectOnce` 保证「所有关闭路径恰好派发一次 OnDisconnect」**：`Disconnect()`（关队列 + 通知）、`Abort()`（关队列 + 立即关 TCP + 通知）、`receiverRun` 的读/处理错误、`senderRun` 的写错误、`recoverPanic` 五条路径统一走 `fireDisconnect()`。
+  - ⚠️ **绝不能**改用 `q.IsClose()` 做门：该谓词描述队列状态、与「业务是否已通知」无关，而主动 Close 会先关队列——历史上正是它让 `RemoveSession`（全仓唯一调用点在 netServer 的断开闭包里）在主动关闭路径上整体不执行（报告 SEC-01）。
+  - ⚠️ 断开通知在**调用 goroutine 内同步**跑完整条链，因此持锁路径不得调 `Disconnect()`/`Close()`，否则重入业务自己的锁即自死锁。
+- `senderRun` 写失败必须 `Abort()`：此前是裸 `return`，既不关 fd（全仓再无别处关它）也不关队列，导致 fd 永久泄漏 + `SendData` 恒"成功"地把数据堆进无人消费的队列（报告 LEAK-02）。
+- `ConnectorSocket`：内嵌 ConnSocket，`Connect()` 拨号 + keepalive(30s) + 起收发 goroutine；`onConnectFunc` 判空后调用。
+- `AcceptorSocket`：`Listen()` 预绑定端口（判"已绑定且未关闭"，故 `Stop()` 后能真正重绑并如实报错）；`Start()` 复用已绑定 listener，**入口绑定一次、循环内不再重绑**（否则会把被 Stop 的端口重新占上）；`Stop()` 复位 `listener` 字段并回传关闭错误；`Accept` 的临时错误指数退避重试，仅 `net.ErrClosed`/已 Stop 才终止。
+- **recover 兜底**：`receiverRun`/`senderRun` 入口、accept 回调（`safeAccept`）、以及 **client 侧拨号 goroutine**（2026-09-13 补，原先缺失）均 recover——链上/业务 handler 的任何 panic 按「关闭该连接」处理，单连接异常不杀进程。注意 `netSession.Close()` 不再把 `conn` 置 nil，断开回调里仍可取 `RemoteAddr()` 记日志。
 
 ⚠️ **健壮性缺口（已知，未修）**：
-- 发送队列**无界**（满了翻倍扩容）：慢消费者 + 快生产者会持续吃内存，无背压。
+- 发送队列**无界**（满则翻倍）：慢消费者 + 快生产者持续吃内存，无背压；`Push` 用 `make` 扩容，溢出时会在**调用方 goroutine**里 panic。
 - **无应用层心跳**：仅 TCP keepalive，NAT 映射失效/半开连接双方长期无感知。
-- **无超时**：拨号无 deadline（`net.Dial` 裸调），收发循环无读写 deadline；未设 `TCP_NODELAY`（交互式协议延迟受损）。
+- **握手阶段无任何超时、无连接数上限**：对端完成三次握手后静默即可让服务端的会话 + 2 个 goroutine + 整条中间件实例永久驻留（**预认证**资源耗尽）；客户端 `Connect()` 可无限阻塞。TCP keepalive 杀得死死对端，杀不死"活着但不握手"。
+- 稳态连接也**无读写 deadline**；未设 `TCP_NODELAY`（交互式协议延迟受损）。
+- 无半关闭语义：任一方向 FIN 即双向拆除。

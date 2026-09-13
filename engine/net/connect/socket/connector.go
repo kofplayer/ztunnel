@@ -1,8 +1,8 @@
 package socketNetConnect
 
 import (
-	"fmt"
 	"net"
+	"strconv"
 	"time"
 	netConnect "ztunnel/engine/net/connect"
 )
@@ -22,7 +22,7 @@ type ConnectorSocket struct {
 }
 
 func (this *ConnectorSocket) Connect() error {
-	conn, err := net.Dial("tcp", fmt.Sprintf("%v:%v", this.host, this.port))
+	conn, err := net.Dial("tcp", net.JoinHostPort(this.host, strconv.Itoa(int(this.port))))
 	if err != nil {
 		return err
 	}
@@ -36,7 +36,10 @@ func (this *ConnectorSocket) Connect() error {
 	this.ConnSocket.conn = conn
 	go this.receiverRun()
 	go this.senderRun()
-	this.onConnectFunc()
+	// 判空：与 ConnSocket.recoverPanic 的处理保持一致，未设置回调时不得 nil 调用
+	if this.onConnectFunc != nil {
+		this.onConnectFunc()
+	}
 	return nil
 }
 

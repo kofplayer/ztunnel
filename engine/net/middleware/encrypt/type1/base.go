@@ -5,8 +5,9 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/binary"
 	"fmt"
-	"math/rand"
+	"io"
 	"sync"
 
 	netMiddleware "ztunnel/engine/net/middleware"
@@ -36,8 +37,20 @@ type BaseNetEncrypt struct {
 	ScNo Key
 }
 
-func (m *BaseNetEncrypt) GenKey() Key {
-	return Key(rand.Uint64())
+// GenKey 生成一个会话密钥材料。
+//
+// 修复 CRYPT-02：此前用 math/rand 的全局生成器（rand.Uint64）。math/rand 的
+// 发生器不具密码学不可预测性，Go 文档明确要求"保存不可预测秘密的程序必须用
+// crypto/rand"——而这里生成的正是整条会话的加密密钥。
+//
+// ⚠️ 失败时**必须**把 error 传出去，绝不能降级返回 0：Key=0 会让 XOR 掩码全零，
+// 该连接的数据直接明文上网。
+func (m *BaseNetEncrypt) GenKey() (Key, error) {
+	var b [keySize]byte
+	if _, err := io.ReadFull(cryptoRand.Reader, b[:]); err != nil {
+		return 0, fmt.Errorf("gen key: %w", err)
+	}
+	return Key(binary.LittleEndian.Uint64(b[:])), nil
 }
 
 func (m *BaseNetEncrypt) GetKeyBytes(key Key, size int) []byte {
@@ -49,16 +62,23 @@ func (m *BaseNetEncrypt) GetKeyBytes(key Key, size int) []byte {
 	return r
 }
 
-func (m *BaseNetEncrypt) GetKeyByBytes(data []byte, size int) Key {
+// GetKeyByBytes 按小端字节序还原密钥。
+//
+// 修复 M-06：此前 data 短于 size 时会**静默按短数据处理、高位留 0**，
+// 于是畸形短握手帧会被当作合法密钥接受（密钥空间被压缩，且攻击者可控的
+// 字节直接进入掩码）。长度不足现在必须报错。
+func (m *BaseNetEncrypt) GetKeyByBytes(data []byte, size int) (Key, error) {
+	if size < 0 || size > keySize {
+		return 0, fmt.Errorf("invalid key size %d", size)
+	}
+	if len(data) < size {
+		return 0, fmt.Errorf("key data too short: need %d, got %d", size, len(data))
+	}
 	var key Key = 0
-	if size > len(data) {
-		size = len(data)
-	}
 	for i := range size {
-		c := data[i]
-		key |= Key(c) << (i * 8)
+		key |= Key(data[i]) << (i * 8)
 	}
-	return key
+	return key, nil
 }
 
 func (m *BaseNetEncrypt) TableEncrypt(data []byte) {
@@ -84,17 +104,36 @@ func (m *BaseNetEncrypt) getKeyAndStrBytes(key Key, data []byte) []byte {
 	return data1
 }
 
-func (m *BaseNetEncrypt) getKeyAndStrByBytes(data []byte) (Key, []byte) {
+// getKeyAndStrByBytes 解析握手第二帧的布局 [key高4B | str | key低4B]。
+//
+// 原先 strlen<0 时静默 `return 0, nil`，等于把畸形帧当作"密钥 0 + 空公钥"
+// 继续握手（报告 M-06 同源问题）。现在一律报错。
+func (m *BaseNetEncrypt) getKeyAndStrByBytes(data []byte) (Key, []byte, error) {
 	strlen := len(data) - keySize
 	if strlen < 0 {
-		return 0, nil
+		return 0, nil, fmt.Errorf("handshake frame too short: %d bytes", len(data))
 	}
-	key1 := m.GetKeyByBytes(data, keySize/2)
+	keyHi, err := m.GetKeyByBytes(data, keySize/2)
+	if err != nil {
+		return 0, nil, err
+	}
 	str := data[keySize/2 : keySize/2+strlen]
-	key2 := m.GetKeyByBytes(data[keySize/2+strlen:], keySize/2)
-	key := (key1 << ((keySize / 2) * 8)) | key2
-	return key, str
+	keyLo, err := m.GetKeyByBytes(data[keySize/2+strlen:], keySize/2)
+	if err != nil {
+		return 0, nil, err
+	}
+	return (keyHi << ((keySize / 2) * 8)) | keyLo, str, nil
 }
+
+// minRSABits / minRSAExponent 是对端公钥的显式策略下限。
+//
+// 修复 M-23：`x509.ParsePKIXPublicKey` 本身**接受** e=1 与 1023 位模数的弱公钥，
+// 此前唯一的防线是 rsa.EncryptOAEP 内部的隐式下限——一旦 Go 上调该下限
+// （官方有此计划）握手就会 100% 失败。策略必须写在自己这一侧。
+const (
+	minRSABits     = 2048
+	minRSAExponent = 65537
+)
 
 func (m *BaseNetEncrypt) GetPublicKeyByBytes(data []byte) (*rsa.PublicKey, error) {
 	pubInterface, err := x509.ParsePKIXPublicKey(data)
@@ -104,6 +143,12 @@ func (m *BaseNetEncrypt) GetPublicKeyByBytes(data []byte) (*rsa.PublicKey, error
 	pub, ok := pubInterface.(*rsa.PublicKey)
 	if !ok {
 		return nil, fmt.Errorf("failed to decode public key")
+	}
+	if bits := pub.N.BitLen(); bits < minRSABits {
+		return nil, fmt.Errorf("peer RSA key too weak: %d bits, need >= %d", bits, minRSABits)
+	}
+	if pub.E < minRSAExponent {
+		return nil, fmt.Errorf("peer RSA exponent too weak: %d, need >= %d", pub.E, minRSAExponent)
 	}
 	return pub, nil
 }
@@ -136,12 +181,19 @@ func (m *BaseNetEncrypt) GetType1NetEncryptKey(keys ...Key) Key {
 	return key
 }
 
+// KeyMaskData 用给定密钥材料的 XOR 流掩码就地加/解密 data。
+//
+// ⚠️ 修复 CRYPT-01（**线上断代**改动，两端必须同时升级）：
+// 掩码字节此前取 `uint8((key >> i) & 0xFF)`，i 是 0..7 的下标——这是**按位**
+// 位移而不是按字节位移，于是 8 个掩码字节只覆盖 key 的 bit0..bit14，
+// **高 49 bit 被完全丢弃**。实测（reports/evidence/CRYPT-01_mask_entropy.go）：
+// 64 位密钥空间只产生 32768 种不同掩码，且低 15 bit 为 0 的 key 产生全零掩码，
+// 该连接数据原样明文上网。
+// 现在按字节取，与同文件 GetKeyBytes 的小端布局保持一致。
 func (m *BaseNetEncrypt) KeyMaskData(data []byte, keys ...Key) {
 	key := m.GetType1NetEncryptKey(keys...)
 	var masks [keySize]uint8
-	for i := range masks {
-		masks[i] = uint8((key >> i) & 0xFF)
-	}
+	binary.LittleEndian.PutUint64(masks[:], uint64(key))
 	for i := range data {
 		data[i] ^= masks[i%keySize]
 	}

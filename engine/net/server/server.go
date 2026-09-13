@@ -91,6 +91,9 @@ func (this *netServer) Start() error {
 			if err != nil {
 				return err
 			}
+			if this.onMessage == nil {
+				return nil
+			}
 			return this.onMessage(s, cb, msgID, msgData)
 		}, func() {
 			if this.onReady != nil {
@@ -108,14 +111,21 @@ func (this *netServer) Start() error {
 		})
 		conn.SetOnDisconnect(func() {
 			firstMiddleware.FireEvent(netMiddleware.MiddlewareEventOnDisconnect)
-			this.onDisconnect(s)
+			// 四个业务回调都可能未设置。断开通知现在会在主动 Close 路径上真正
+			// 派发到这里（报告 SEC-01），任何一处漏判空都会 nil panic 并让下面的
+			// RemoveSession 不执行——那正好复现本次要修的泄漏。
+			if this.onDisconnect != nil {
+				this.onDisconnect(s)
+			}
 			this.sessionMgr.RemoveSession(s.GetID())
 		})
 		conn.SetOnData(func(data []byte) error {
 			return firstMiddleware.ReceiveData(data)
 		})
 		firstMiddleware.FireEvent(netMiddleware.MiddlewareEventOnConnect)
-		this.onAccept(s)
+		if this.onAccept != nil {
+			this.onAccept(s)
+		}
 	})
 	return this.acceptor.Start()
 }
