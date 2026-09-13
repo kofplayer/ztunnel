@@ -92,7 +92,7 @@ cd cmd && ./build.bat
 | **`-net_encrypt` 是混淆不是加密**：无服务端身份验证（主动 MITM 可拿下 token 并解全部流量）、无 MAC（verifier 的 XOR 和对字节置换不变）、帧长在最外层明文、服务端 RSA 私钥全连接共用 → 无前向保密。根治 = 迁移 `crypto/tls` + 公钥 pinning | [engine/net/middleware/CLAUDE.md](engine/net/middleware/CLAUDE.md) |
 | 健壮性缺口：无应用层心跳（NAT 半开连接无感知）、**握手阶段无超时且无连接数上限**（预认证资源耗尽） | [engine/net/CLAUDE.md](engine/net/CLAUDE.md) |
 | 无半关闭语义：任一方向 FIN 即双向拆除，`Connection: close` / `nc` / SMTP-FTP `QUIT` 类协议会看到响应截断 | [server/CLAUDE.md](server/CLAUDE.md) |
-| `log` 包轮转无同步（fd 泄漏/日志丢失/竞态），`Fatal` 级别既不 exit 也不区别对待；日志落相对路径 `./log`，**无大小上限、无清理** | [engine/CLAUDE.md](engine/CLAUDE.md) |
+| `log` 包：`Fatal` 级别既不 exit 也不区别对待；日志落相对路径 `./log`，**无大小上限、无清理**（轮转竞态与错误吞掉已于批次3 修复） | [engine/CLAUDE.md](engine/CLAUDE.md) |
 | `OpenClient` 在控制通道唯一 receiver goroutine 上同步拨号 → 单条用户连接可头阻塞整条隧道；用户一连上即拨内网服务且无每隧道上限 | [client/CLAUDE.md](client/CLAUDE.md) |
 | 会话 ID 为 uint32 自增且**绝不复用**（无串流风险）。回绕覆盖已修：`NewSession` 遇占用的 ID 会**线性探测**空闲槽位，`OpenClient` 另有身份核对，两处都不会再静默顶掉在用会话 | [engine/net/CLAUDE.md](engine/net/CLAUDE.md) |
 | ws 传输层整体被注释掉，仅 socket 可用 | [engine/net/CLAUDE.md](engine/net/CLAUDE.md) |
