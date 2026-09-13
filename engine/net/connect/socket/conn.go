@@ -19,10 +19,18 @@ func newConn(conn net.Conn) *ConnSocket {
 }
 
 type ConnSocket struct {
-	q                queueDef.Queue
+	q    queueDef.Queue
+	conn net.Conn
+	// cbMu 保护下面两个回调字段。
+	//
+	// 它们由 accept/拨号 goroutine 通过 SetOnXxx 写入，却会被多条 goroutine 读：
+	// receiverRun/senderRun（原先只有这两处，靠 go 语句建立的 happens-before 就够）、
+	// 以及 safeAccept 的 recover 路径。SEC-01 修复之后又多了一条——任意 goroutine 的
+	// netSession.Close() → Disconnect() → fireDisconnect() 也会读 onDisconnectFunc，
+	// 于是原先的保证不再成立（实测 -race 报出 DATA RACE）。
+	cbMu             sync.RWMutex
 	onDisconnectFunc netConnect.OnDisconnectFunc
 	onDataFunc       netConnect.OnDataFunc
-	conn             net.Conn
 	// disconnectOnce 保证断开通知在**所有**关闭路径上恰好执行一次。
 	//
 	// 这里原先用的是 `if !q.IsClose()`。该谓词描述的是队列状态，与"业务是否
@@ -71,9 +79,11 @@ func (this *ConnSocket) Abort() {
 // safeAccept 内安装的，若此前就 panic 并触发本函数，一次空的 Do 会把
 // 唯一的通知机会烧掉，令会话永久残留在 map 里。
 func (this *ConnSocket) fireDisconnect() {
+	this.cbMu.RLock()
 	f := this.onDisconnectFunc
+	this.cbMu.RUnlock()
 	if f == nil {
-		return
+		return // 见上：不消耗 Once，留给回调安装之后
 	}
 	this.disconnectOnce.Do(f)
 }
@@ -83,11 +93,15 @@ func (this *ConnSocket) SendData(data []byte) error {
 }
 
 func (this *ConnSocket) SetOnDisconnect(onDisconnectFunc netConnect.OnDisconnectFunc) {
+	this.cbMu.Lock()
 	this.onDisconnectFunc = onDisconnectFunc
+	this.cbMu.Unlock()
 }
 
 func (this *ConnSocket) SetOnData(onDataFunc netConnect.OnDataFunc) {
+	this.cbMu.Lock()
 	this.onDataFunc = onDataFunc
+	this.cbMu.Unlock()
 }
 
 func (this *ConnSocket) receiverRun() {
@@ -96,14 +110,22 @@ func (this *ConnSocket) receiverRun() {
 	// bufio.Reader 在这种情况下本就是直读底层 conn（不多一次拷贝），
 	// 留着它只是每连接白分配 4096 字节（报告 P-01）。
 	var buf [4096]byte
+	// 回调只被设置一次，入口取一次快照即可，避免每帧都过锁。
+	this.cbMu.RLock()
+	onData := this.onDataFunc
+	this.cbMu.RUnlock()
 	for {
 		n, err := this.conn.Read(buf[:])
 		if err != nil {
 			this.Disconnect()
 			return
 		}
-		err = this.onDataFunc(buf[:n])
-		if err != nil {
+		if onData == nil {
+			// 没有数据回调就无法处理任何一帧，按断开处理而不是空转
+			this.Disconnect()
+			return
+		}
+		if err = onData(buf[:n]); err != nil {
 			this.Disconnect()
 			return
 		}
