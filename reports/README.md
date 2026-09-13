@@ -9,11 +9,11 @@
 | [2026-09-13-修复执行记录.md](2026-09-13-修复执行记录.md) | **实际执行了什么、验证结果、执行中新发现的问题与对审计结论的更正、尚未执行项、兼容性影响** |
 | [evidence/LEAK-01_probe_test.go](evidence/LEAK-01_probe_test.go) | SEC-01 的原始复现探针（修复前为红）。该断言已作为正式用例固化进 `server/inserver/lifecycle_test.go` |
 | [evidence/CRYPT-01_mask_entropy.go](evidence/CRYPT-01_mask_entropy.go) | CRYPT-01 的数值证明：64 位密钥的有效熵坍缩到 15 bit。`cd reports/evidence && go run CRYPT-01_mask_entropy.go` |
-| `PROGRESS.md`（**本工作树中不存在**） | ⚠️ 会话上下文里注入过一份同名状态快照，声称 `CloseWrite`、`mwreadtimeout/`、`keepalive/`、ws 解禁、109 用例已完成——经逐项核查代码，这些**均不在当前仓库中**；但该文件本身在树里查不到，来源无法确认。结论与更正见执行记录最后一节 |
+| [PROGRESS.md](PROGRESS.md) | **订正版状态记录**。上下文里曾反复注入一份同名内容，把 `CloseWrite`、`mwreadtimeout/`、`keepalive/`、ws 解禁、"109 用例全过"等**并未落地**的工作记为"已完成"；该文件当时在本树中并不存在。现按逐项核实的事实重建，含每条主张的证据与后续维护约定 |
 
 ## 当前状态
 
-审查阶段全程只读；**修复阶段已实际修改源码**（Phase 0 / 1 / 2a / 3 的一部分），改动尚未提交、留在工作树中。详见执行记录。
+审查阶段全程只读；修复与补测试阶段**已实际修改源码并分 4 个提交落在 `main`**（`c96344c` 仓库卫生与 CI、`09b5ca3` 生命周期/加密/健壮性修复、`1ecbb1a` 补齐测试覆盖、`9a03f90` 数据竞争修复），本地领先 `origin/main`，**尚未推送**。
 
 验证基线：`go build ./...`、`go vet ./...`、`go test -race -count=2 ./...` 全部通过，`gofmt -l .` 为 0；测试函数 48 → 215，语句覆盖率（`-coverpkg=./...`）74.7% → 87.7%，生产代码（排除 `testutil`）函数均值 92.6%；新增 `e2e/` 端到端包。
 
